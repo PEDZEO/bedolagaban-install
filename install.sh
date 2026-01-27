@@ -283,140 +283,170 @@ echo ""
 print_header "TLS шифрование для агентов (опционально)"
 echo ""
 print_info "TLS защищает соединение между агентами и сервером"
-print_info "Требуется домен с SSL сертификатом от Caddy"
+print_info "Поддерживается Caddy, Nginx, и любой другой reverse proxy"
 print_warning "Если нет домена - можно пропустить (агенты подключатся по IP)"
 echo ""
 
+# Инициализируем переменные TLS
+TLS_CERT_PATH=""
+TLS_KEY_PATH=""
+CADDY_DATA_PATH=""
+TLS_DOMAIN=""
+TLS_MODE=""
+
 if ask_yes_no "Включить TLS шифрование?"; then
     echo ""
-    print_info "Например: agent.example.com"
-    TLS_DOMAIN=$(ask_question "Домен для агентов:")
-
+    print_info "Выбери источник сертификатов:"
+    echo "  1) Caddy (автоопределение Let's Encrypt сертификатов)"
+    echo "  2) Указать путь вручную (Nginx, Certbot, любой другой)"
     echo ""
-    print_info "Ищу сертификат для домена: $TLS_DOMAIN"
 
-    # Список возможных путей для локальной установки Caddy
-    LOCAL_CADDY_PATHS=(
-        "/var/lib/caddy/.local/share/caddy"
-        "/root/.local/share/caddy"
-        "$HOME/.local/share/caddy"
-        "/var/snap/caddy/common/.local/share/caddy"
-        "/etc/caddy/.local/share/caddy"
-    )
-
-    FOUND_PATH=""
-    FOUND_VOLUME=""
-
-    # Проверяем локальные установки Caddy
-    print_info "Проверяю локальные установки Caddy..."
-    for local_path in "${LOCAL_CADDY_PATHS[@]}"; do
-        if [ -d "$local_path" ]; then
-            DOMAIN_CERT="$local_path/certificates/acme-v02.api.letsencrypt.org-directory/$TLS_DOMAIN/$TLS_DOMAIN.crt"
-            if [ -f "$DOMAIN_CERT" ]; then
-                print_success "Найден сертификат для $TLS_DOMAIN (локальная установка)"
-                print_info "  → $local_path"
-                FOUND_PATH="$local_path"
-                FOUND_VOLUME="local"
-                break
-            elif [ -d "$local_path/certificates" ]; then
-                CERT_COUNT=$(find "$local_path/certificates" -name "*.crt" 2>/dev/null | wc -l)
-                if [ "$CERT_COUNT" -gt 0 ] && [ -z "$FOUND_PATH" ]; then
-                    print_info "→ Найдены другие сертификаты в: $local_path ($CERT_COUNT шт.)"
-                    FOUND_PATH="$local_path"
-                    FOUND_VOLUME="local"
-                fi
-            fi
-        fi
+    while true; do
+        TLS_MODE=$(ask_question "Выбери (1 или 2):")
+        case $TLS_MODE in
+            1) TLS_MODE="caddy"; break;;
+            2) TLS_MODE="manual"; break;;
+            *) print_warning "Выбери 1 или 2";;
+        esac
     done
 
-    # Если не нашли локально, ищем в Docker volumes
-    if [ -z "$FOUND_PATH" ]; then
-        print_info "Проверяю Docker volumes..."
-        CADDY_VOLUMES=$(docker volume ls --format '{{.Name}}' | grep -i caddy 2>/dev/null)
+    if [ "$TLS_MODE" = "caddy" ]; then
+        # ===== Режим Caddy =====
+        echo ""
+        print_info "Например: agent.example.com"
+        TLS_DOMAIN=$(ask_question "Домен для агентов:")
 
-        if [ -n "$CADDY_VOLUMES" ]; then
-            print_success "Найдены Caddy volumes:"
-            echo "$CADDY_VOLUMES" | while read vol; do
-                MOUNTPOINT=$(docker volume inspect "$vol" --format '{{.Mountpoint}}' 2>/dev/null)
-                echo "  • $vol → $MOUNTPOINT"
-            done
-            echo ""
+        echo ""
+        print_info "Ищу сертификат для домена: $TLS_DOMAIN"
 
-            while IFS= read -r vol; do
-                MOUNTPOINT=$(docker volume inspect "$vol" --format '{{.Mountpoint}}' 2>/dev/null)
-                if [ -n "$MOUNTPOINT" ] && [ -d "$MOUNTPOINT" ]; then
-                    DOMAIN_CERT_PATH="$MOUNTPOINT/caddy/certificates/acme-v02.api.letsencrypt.org-directory/$TLS_DOMAIN/$TLS_DOMAIN.crt"
-                    if [ -f "$DOMAIN_CERT_PATH" ]; then
-                        print_success "Найден сертификат для $TLS_DOMAIN в: $vol"
-                        FOUND_PATH="$MOUNTPOINT/caddy"
-                        FOUND_VOLUME="$vol"
-                        break
-                    fi
-                    DOMAIN_CERT_PATH="$MOUNTPOINT/certificates/acme-v02.api.letsencrypt.org-directory/$TLS_DOMAIN/$TLS_DOMAIN.crt"
-                    if [ -f "$DOMAIN_CERT_PATH" ]; then
-                        print_success "Найден сертификат для $TLS_DOMAIN в: $vol"
-                        FOUND_PATH="$MOUNTPOINT"
-                        FOUND_VOLUME="$vol"
-                        break
+        LOCAL_CADDY_PATHS=(
+            "/var/lib/caddy/.local/share/caddy"
+            "/root/.local/share/caddy"
+            "$HOME/.local/share/caddy"
+            "/var/snap/caddy/common/.local/share/caddy"
+            "/etc/caddy/.local/share/caddy"
+        )
+
+        FOUND_PATH=""
+
+        print_info "Проверяю локальные установки Caddy..."
+        for local_path in "${LOCAL_CADDY_PATHS[@]}"; do
+            if [ -d "$local_path" ]; then
+                DOMAIN_CERT="$local_path/certificates/acme-v02.api.letsencrypt.org-directory/$TLS_DOMAIN/$TLS_DOMAIN.crt"
+                if [ -f "$DOMAIN_CERT" ]; then
+                    print_success "Найден сертификат для $TLS_DOMAIN"
+                    print_info "  → $local_path"
+                    FOUND_PATH="$local_path"
+                    break
+                elif [ -d "$local_path/certificates" ]; then
+                    CERT_COUNT=$(find "$local_path/certificates" -name "*.crt" 2>/dev/null | wc -l)
+                    if [ "$CERT_COUNT" -gt 0 ] && [ -z "$FOUND_PATH" ]; then
+                        print_info "→ Найдены другие сертификаты в: $local_path ($CERT_COUNT шт.)"
+                        FOUND_PATH="$local_path"
                     fi
                 fi
-            done <<< "$CADDY_VOLUMES"
+            fi
+        done
 
-            if [ -z "$FOUND_PATH" ]; then
-                FIRST_DATA_VOLUME=$(echo "$CADDY_VOLUMES" | grep "_data" | head -n1)
-                if [ -n "$FIRST_DATA_VOLUME" ]; then
-                    FOUND_PATH=$(docker volume inspect "$FIRST_DATA_VOLUME" --format '{{.Mountpoint}}' 2>/dev/null)
-                    if [ -d "$FOUND_PATH/caddy" ]; then
-                        FOUND_PATH="$FOUND_PATH/caddy"
+        # Ищем в Docker volumes
+        if [ -z "$FOUND_PATH" ]; then
+            print_info "Проверяю Docker volumes..."
+            CADDY_VOLUMES=$(docker volume ls --format '{{.Name}}' | grep -i caddy 2>/dev/null)
+
+            if [ -n "$CADDY_VOLUMES" ]; then
+                while IFS= read -r vol; do
+                    MOUNTPOINT=$(docker volume inspect "$vol" --format '{{.Mountpoint}}' 2>/dev/null)
+                    if [ -n "$MOUNTPOINT" ] && [ -d "$MOUNTPOINT" ]; then
+                        for sub in "caddy/" ""; do
+                            DOMAIN_CERT_PATH="$MOUNTPOINT/${sub}certificates/acme-v02.api.letsencrypt.org-directory/$TLS_DOMAIN/$TLS_DOMAIN.crt"
+                            if [ -f "$DOMAIN_CERT_PATH" ]; then
+                                FOUND_PATH="$MOUNTPOINT/${sub%/}"
+                                print_success "Найден сертификат в Docker volume: $vol"
+                                break 2
+                            fi
+                        done
                     fi
-                    FOUND_VOLUME="$FIRST_DATA_VOLUME"
-                    print_info "→ Использую: $FIRST_DATA_VOLUME"
+                done <<< "$CADDY_VOLUMES"
+
+                if [ -z "$FOUND_PATH" ]; then
+                    FIRST_DATA_VOLUME=$(echo "$CADDY_VOLUMES" | grep "_data" | head -n1)
+                    if [ -n "$FIRST_DATA_VOLUME" ]; then
+                        FOUND_PATH=$(docker volume inspect "$FIRST_DATA_VOLUME" --format '{{.Mountpoint}}' 2>/dev/null)
+                        [ -d "$FOUND_PATH/caddy" ] && FOUND_PATH="$FOUND_PATH/caddy"
+                        print_info "→ Использую: $FIRST_DATA_VOLUME"
+                    fi
                 fi
             fi
         fi
-    fi
 
-    if [ -z "$FOUND_PATH" ]; then
-        echo ""
-        print_warning "Сертификат для $TLS_DOMAIN не найден автоматически"
-        print_info "Возможные пути:"
-        print_info "  • Локально: /var/lib/caddy/.local/share/caddy"
-        print_info "  • Docker: /var/lib/docker/volumes/caddy_caddy_data/_data/caddy"
-        echo ""
-        CADDY_DATA_PATH=$(ask_question "Путь к Caddy data:")
-        if [ -z "$CADDY_DATA_PATH" ]; then
-            CADDY_DATA_PATH="/var/lib/caddy/.local/share/caddy"
-            print_info "→ Использую локальный путь по умолчанию"
-        fi
-    else
-        echo ""
-        print_success "Рекомендуемый путь: $FOUND_PATH"
-        CADDY_DATA_PATH=$(ask_question "Путь к Caddy data (Enter для '$FOUND_PATH'):")
-        if [ -z "$CADDY_DATA_PATH" ]; then
-            CADDY_DATA_PATH="$FOUND_PATH"
-            print_success "Использую найденный путь"
-        fi
-    fi
-
-    if [ -d "$CADDY_DATA_PATH" ]; then
-        print_success "Путь существует: $CADDY_DATA_PATH"
-        DOMAIN_CERT="$CADDY_DATA_PATH/certificates/acme-v02.api.letsencrypt.org-directory/$TLS_DOMAIN/$TLS_DOMAIN.crt"
-        if [ -f "$DOMAIN_CERT" ]; then
-            print_success "Сертификат для $TLS_DOMAIN найден!"
+        if [ -z "$FOUND_PATH" ]; then
+            echo ""
+            print_warning "Сертификат не найден автоматически"
+            print_info "Укажи путь к директории данных Caddy"
+            echo ""
+            CADDY_DATA_PATH=$(ask_question "Путь к Caddy data:")
+            CADDY_DATA_PATH=${CADDY_DATA_PATH:-/var/lib/caddy/.local/share/caddy}
         else
-            print_warning "Сертификат для $TLS_DOMAIN НЕ найден"
-            print_info "Добавь домен в Caddyfile и перезапусти Caddy"
+            echo ""
+            CADDY_DATA_PATH=$(ask_question "Путь к Caddy data (Enter для '$FOUND_PATH'):")
+            CADDY_DATA_PATH=${CADDY_DATA_PATH:-$FOUND_PATH}
+            print_success "Использую: $CADDY_DATA_PATH"
         fi
+
+        # Проверяем сертификат
+        if [ -d "$CADDY_DATA_PATH" ]; then
+            print_success "Путь существует: $CADDY_DATA_PATH"
+            DOMAIN_CERT="$CADDY_DATA_PATH/certificates/acme-v02.api.letsencrypt.org-directory/$TLS_DOMAIN/$TLS_DOMAIN.crt"
+            if [ -f "$DOMAIN_CERT" ]; then
+                print_success "Сертификат для $TLS_DOMAIN найден!"
+            else
+                print_warning "Сертификат для $TLS_DOMAIN НЕ найден"
+                print_info "Добавь домен в Caddyfile и перезапусти Caddy"
+            fi
+        else
+            print_warning "Путь не существует: $CADDY_DATA_PATH"
+        fi
+
     else
-        print_warning "Путь не существует: $CADDY_DATA_PATH"
-        print_info "Убедись что Caddy запущен и создал volume"
+        # ===== Ручной режим (Nginx, Certbot, и др.) =====
+        echo ""
+        print_info "Укажи пути к файлам сертификата и ключа"
+        print_info "Примеры (Certbot/Nginx):"
+        echo "  • /etc/letsencrypt/live/example.com/fullchain.pem"
+        echo "  • /etc/letsencrypt/live/example.com/privkey.pem"
+        echo ""
+
+        TLS_CERT_PATH=$(ask_question "Путь к сертификату (.crt/.pem):")
+        while [ -z "$TLS_CERT_PATH" ]; do
+            print_warning "Путь обязателен!"
+            TLS_CERT_PATH=$(ask_question "Путь к сертификату (.crt/.pem):")
+        done
+
+        TLS_KEY_PATH=$(ask_question "Путь к приватному ключу (.key/.pem):")
+        while [ -z "$TLS_KEY_PATH" ]; do
+            print_warning "Путь обязателен!"
+            TLS_KEY_PATH=$(ask_question "Путь к приватному ключу (.key/.pem):")
+        done
+
+        # Проверяем файлы
+        if [ -f "$TLS_CERT_PATH" ]; then
+            print_success "Сертификат найден: $TLS_CERT_PATH"
+        else
+            print_warning "Файл не найден: $TLS_CERT_PATH"
+            print_info "Убедись что путь правильный перед запуском"
+        fi
+
+        if [ -f "$TLS_KEY_PATH" ]; then
+            print_success "Ключ найден: $TLS_KEY_PATH"
+        else
+            print_warning "Файл не найден: $TLS_KEY_PATH"
+            print_info "Убедись что путь правильный перед запуском"
+        fi
     fi
 
     TLS_ENABLED="true"
 else
     TLS_ENABLED="false"
-    TLS_DOMAIN=""
-    CADDY_DATA_PATH=""
     print_info "→ TLS отключен"
     print_info "→ Агенты будут подключаться по IP без шифрования"
 fi
@@ -631,6 +661,8 @@ TELEGRAM_TOPIC_ID=$TELEGRAM_TOPIC_ID
 # === TLS шифрование ===
 TLS_ENABLED=$TLS_ENABLED
 TLS_DOMAIN=$TLS_DOMAIN
+TLS_CERT_PATH=$TLS_CERT_PATH
+TLS_KEY_PATH=$TLS_KEY_PATH
 CADDY_DATA_PATH=$CADDY_DATA_PATH
 
 # === Panel API ===
@@ -709,11 +741,17 @@ else
     REMNAWAVE_NET_REF=""
 fi
 
-# Определяем CADDY volume mount (только если TLS включён)
-if [ "$TLS_ENABLED" = "true" ] && [ -n "$CADDY_DATA_PATH" ]; then
-    CADDY_VOLUME="      - ${CADDY_DATA_PATH}:/caddy_data:ro"
-else
-    CADDY_VOLUME=""
+# Определяем TLS volume mount
+TLS_VOLUME=""
+if [ "$TLS_ENABLED" = "true" ]; then
+    if [ -n "$CADDY_DATA_PATH" ]; then
+        # Caddy mode: монтируем директорию данных Caddy
+        TLS_VOLUME="      - ${CADDY_DATA_PATH}:/caddy_data:ro"
+    elif [ -n "$TLS_CERT_PATH" ]; then
+        # Manual mode: монтируем директорию с сертификатами
+        CERT_DIR=$(dirname "$TLS_CERT_PATH")
+        TLS_VOLUME="      - ${CERT_DIR}:${CERT_DIR}:ro"
+    fi
 fi
 
 cat > "$COMPOSE_FILE" << COMPOSE
@@ -733,7 +771,7 @@ services:
       - TCP_PORT=9999
     volumes:
       - ./data:/app/data
-${CADDY_VOLUME}
+${TLS_VOLUME}
     networks:
       - banhammer-network
 ${REMNAWAVE_NET_REF}
