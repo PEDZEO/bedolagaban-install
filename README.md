@@ -1,83 +1,101 @@
+<div align="center">
+
 # BedolagaBan
 
-Система мониторинга и управления VPN подключениями. Автоматическое обнаружение мультиаккаунтов, блокировка нарушителей, мониторинг трафика и сетевой активности.
+**Система мониторинга и защиты VPN подключений**
+
+Автоматическое обнаружение мультиаккаунтов, блокировка нарушителей, аналитика трафика
+
+[![Remnawave](https://img.shields.io/badge/Panel-Remnawave-blue)](https://github.com/remnawave)
+[![Docker](https://img.shields.io/badge/Docker-Compose%20v2-2496ED)](https://docs.docker.com/compose/)
+[![License](https://img.shields.io/badge/License-Commercial-red)](#лицензия)
+
+</div>
+
+---
 
 ## Возможности
 
-- Мониторинг подключений в реальном времени
-- Автоматическое обнаружение мультиаккаунтов
-- Система наказаний с гибкими правилами
-- Определение типа сети (Wi-Fi / Mobile / VPN)
-- GeoIP аналитика
-- Telegram бот для управления
-- REST API
-- Поддержка нескольких VPN нод через агенты
+| | Функция | Описание |
+|---|---------|----------|
+| **Мониторинг** | Подключения в реальном времени | Отслеживание всех активных сессий |
+| **Мультиаккаунты** | Автоматическое обнаружение | Детекция по IP, fingerprint, поведению |
+| **Наказания** | Гибкая система банов | Прогрессивные баны, ручные блокировки |
+| **Сеть** | Определение типа подключения | Wi-Fi / Mobile / VPN / Datacenter |
+| **GeoIP** | Аналитика по странам | Геолокация и ASN всех подключений |
+| **Telegram** | Бот для управления | Уведомления, команды, отчёты |
+| **API** | REST API | Полный контроль через HTTP |
+| **Ноды** | Мульти-серверная архитектура | Агенты на каждой VPN ноде |
 
 ## Требования
 
-- Linux (Ubuntu 20.04+ / Debian 11+)
-- Docker + Docker Compose v2
-- 2 GB RAM (сервер), 256 MB RAM (агент)
-- Лицензионный ключ
+- **OS:** Linux (Ubuntu 20.04+ / Debian 11+)
+- **Docker:** Docker + Docker Compose v2
+- **RAM:** 2 GB (сервер) / 256 MB (агент)
+- **Панель:** [Remnawave](https://github.com/remnawave)
+- **Лицензия:** Лицензионный ключ
 
-## Установка сервера
+## Установка
+
+### Сервер
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/PEDZEO/bedolagaban-install/main/install.sh)
 ```
 
-Скрипт проведёт через все шаги:
-1. Проверка Docker
-2. Настройка панели (3x-ui / Marzban / Remnanode)
-3. Настройка Telegram бота
-4. Настройка безопасности (API токены, TLS)
-5. Настройка PostgreSQL
-6. Настройка портов и firewall
-7. Запуск контейнеров
+Интерактивный установщик проведёт через все шаги:
 
-## Установка агента на VPN ноду
+1. Проверка Docker и системных требований
+2. Настройка токенов безопасности
+3. Ввод лицензионного ключа
+4. Подключение к Remnawave Panel
+5. Настройка Telegram бота
+6. TLS шифрование для агентов
+7. Система автобанов
+8. PostgreSQL для аналитики
+9. Проверка портов и firewall
+10. Запуск контейнеров
+
+### Агент (на каждую VPN ноду)
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/PEDZEO/bedolagaban-install/main/install_agent.sh)
 ```
 
-Агент устанавливается на каждую VPN ноду и отправляет данные о подключениях на центральный сервер.
+Агент собирает данные о подключениях и отправляет на центральный сервер.
 
 ## Управление
 
-После установки сервера:
+<details>
+<summary><b>Сервер</b> — /opt/banhammer</summary>
 
 ```bash
 cd /opt/banhammer
 
-# Логи
-docker compose logs -f
-
-# Перезапуск
-docker compose restart
-
-# Остановка
-docker compose down
-
-# Обновление
-docker compose pull && docker compose up -d
+docker compose logs -f                              # Логи
+docker compose restart                              # Перезапуск
+docker compose down                                 # Остановка
+docker compose pull && docker compose up -d          # Обновление
 ```
 
-После установки агента:
+</details>
+
+<details>
+<summary><b>Агент</b> — /opt/banhammer-agent</summary>
 
 ```bash
 cd /opt/banhammer-agent
 
-# Логи
-docker compose logs -f
-
-# Перезапуск
-docker compose restart
-
-# Обновление
-docker compose pull && docker compose up -d
+docker compose logs -f                              # Логи
+docker compose restart                              # Перезапуск
+docker compose down                                 # Остановка
+docker compose pull && docker compose up -d          # Обновление
 ```
+
+</details>
 
 ## Лицензия
 
-Коммерческое ПО. Все права защищены. Для приобретения лицензии обращайтесь в Telegram: [@pedzeeo](https://t.me/pedzeeo)
+Коммерческое ПО. Все права защищены.
+
+Для приобретения лицензии: [@pedzeeo](https://t.me/pedzeeo)
