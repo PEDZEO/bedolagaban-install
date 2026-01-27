@@ -273,7 +273,24 @@ print_success "docker-compose.yml создан"
 # Запуск
 cd ${INSTALL_DIR}
 
+# Проверяем авторизацию в GHCR
 echo ""
+print_info "Проверяю доступ к реестру образов..."
+if ! docker pull ${IMAGE} --quiet 2>/dev/null; then
+    print_warning "Нет доступа к ${REGISTRY}. Нужна авторизация."
+    print_info "Создай токен: https://github.com/settings/tokens/new"
+    print_info "Нужные права: read:packages"
+    echo ""
+    read -sp "$(printf "${YELLOW}GitHub Personal Access Token: ${NC}")" GHCR_TOKEN
+    echo ""
+    if echo "$GHCR_TOKEN" | docker login ghcr.io -u pedzeo --password-stdin 2>/dev/null; then
+        print_success "Авторизация успешна"
+    else
+        print_error "Не удалось авторизоваться в GHCR"
+        exit 1
+    fi
+fi
+
 print_info "Скачивание образа..."
 docker compose pull
 

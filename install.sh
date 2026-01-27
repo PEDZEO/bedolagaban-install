@@ -208,10 +208,23 @@ echo "  • http://localhost:3000 (если на этом же сервере)"
 echo "  • http://1.2.3.4:3000 (по IP адресу)"
 echo ""
 PANEL_URL=$(ask_question "URL твоей Remnawave Panel:")
+while true; do
+    if [[ "$PANEL_URL" =~ ^https?:// ]]; then
+        print_success "URL корректный"
+        break
+    else
+        print_error "URL должен начинаться с http:// или https://"
+        PANEL_URL=$(ask_question "URL твоей Remnawave Panel:")
+    fi
+done
 
 echo ""
 print_info "JWT токен можно скопировать из настроек панели"
 PANEL_TOKEN=$(ask_question "JWT токен от Remnawave Panel:")
+while [ -z "$PANEL_TOKEN" ]; do
+    print_warning "Токен обязателен!"
+    PANEL_TOKEN=$(ask_question "JWT токен от Remnawave Panel:")
+done
 
 # --- Telegram Bot ---
 echo ""
@@ -219,9 +232,27 @@ print_header "Настройка Telegram бота"
 echo ""
 print_info "Токен можно получить у @BotFather в Telegram"
 TELEGRAM_BOT_TOKEN=$(ask_question "Токен от @BotFather:")
+while true; do
+    if [[ "$TELEGRAM_BOT_TOKEN" =~ ^[0-9]+:.+ ]]; then
+        print_success "Формат токена корректный"
+        break
+    else
+        print_error "Неверный формат! Ожидается: 123456789:ABCdef..."
+        TELEGRAM_BOT_TOKEN=$(ask_question "Токен от @BotFather:")
+    fi
+done
 echo ""
 print_info "Свой ID можно узнать у @userinfobot"
 TELEGRAM_ADMIN_IDS=$(ask_question "Твой Telegram ID:")
+while true; do
+    if [[ "$TELEGRAM_ADMIN_IDS" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+        print_success "ID корректный"
+        break
+    else
+        print_error "Введи числовой Telegram ID (или несколько через запятую)"
+        TELEGRAM_ADMIN_IDS=$(ask_question "Твой Telegram ID:")
+    fi
+done
 
 # --- Уведомления в группу ---
 echo ""
@@ -674,16 +705,15 @@ if [ "$NEED_NETWORK" = true ]; then
     name: ${NETWORK_NAME}"
     REMNAWAVE_NET_REF="      - remnawave-network"
 else
-    REMNAWAVE_NET_DEF="  remnawave-network:
-    external: true"
-    REMNAWAVE_NET_REF="      - remnawave-network"
+    REMNAWAVE_NET_DEF=""
+    REMNAWAVE_NET_REF=""
 fi
 
-# Определяем CADDY volume mount
-if [ -n "$CADDY_DATA_PATH" ]; then
+# Определяем CADDY volume mount (только если TLS включён)
+if [ "$TLS_ENABLED" = "true" ] && [ -n "$CADDY_DATA_PATH" ]; then
     CADDY_VOLUME="      - ${CADDY_DATA_PATH}:/caddy_data:ro"
 else
-    CADDY_VOLUME="      - \${CADDY_DATA_PATH:-/var/lib/docker/volumes/caddy_data/_data}:/caddy_data:ro"
+    CADDY_VOLUME=""
 fi
 
 cat > "$COMPOSE_FILE" << COMPOSE
@@ -867,6 +897,25 @@ echo ""
 
 cd "$INSTALL_DIR"
 
+# Проверяем авторизацию в GHCR
+print_info "Проверяю доступ к реестру образов..."
+if ! docker pull ${REGISTRY}/bedolagaban-server:${TAG} --quiet 2>/dev/null; then
+    echo ""
+    print_warning "Нет доступа к ${REGISTRY}. Нужна авторизация."
+    print_info "Создай токен: https://github.com/settings/tokens/new"
+    print_info "Нужные права: read:packages"
+    echo ""
+    read -sp "$(printf "${YELLOW}GitHub Personal Access Token: ${NC}")" GHCR_TOKEN
+    echo ""
+    if echo "$GHCR_TOKEN" | docker login ghcr.io -u pedzeo --password-stdin 2>/dev/null; then
+        print_success "Авторизация успешна"
+    else
+        print_error "Не удалось авторизоваться в GHCR"
+        print_info "Проверь токен и попробуй вручную: docker login ghcr.io"
+        exit 1
+    fi
+fi
+
 print_info "Скачиваю образы..."
 docker compose pull
 
@@ -1007,15 +1056,12 @@ echo ""
 echo -e "${GREEN}✓ Готово! Система готова к работе.${NC}"
 echo ""
 
-# Сохраняем важную информацию в файл
+# Сохраняем информацию об установке (без секретов)
 cat > ${INSTALL_DIR}/INSTALLATION_INFO.txt << EOF
 BedolagaBan Installation Information
 =====================================
 Дата установки: $(date)
 Директория: $INSTALL_DIR
-
-API Token: $API_TOKEN
-Agent Token: $AGENT_TOKEN
 
 API Endpoint: http://localhost:8080
 TCP Port: 9999
@@ -1023,15 +1069,11 @@ TLS Enabled: $TLS_ENABLED
 $([ "$TLS_ENABLED" = "true" ] && echo "TLS Domain: $TLS_DOMAIN")
 
 PostgreSQL Enabled: $POSTGRES_ENABLED
-$([ "$POSTGRES_ENABLED" = "true" ] && echo "PostgreSQL Password: $POSTGRES_PASSWORD")
-
-Telegram Bot Token: $TELEGRAM_BOT_TOKEN
 Admin IDs: $TELEGRAM_ADMIN_IDS
-
 Panel URL: $PANEL_URL
 $([ "$NEED_NETWORK" = true ] && echo "Docker Network: $NETWORK_NAME")
 
-Полная конфигурация: .env
+Все секреты хранятся в: .env
 EOF
 
 echo ""
