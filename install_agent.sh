@@ -273,26 +273,65 @@ print_success "docker-compose.yml создан"
 # Запуск
 cd ${INSTALL_DIR}
 
-# Проверяем авторизацию в GHCR
+# Скачивание образа
 echo ""
-print_info "Проверяю доступ к реестру образов..."
-if ! docker pull ${IMAGE} --quiet 2>/dev/null; then
-    print_warning "Нет доступа к ${REGISTRY}. Нужна авторизация."
-    print_info "Создай токен: https://github.com/settings/tokens/new"
-    print_info "Нужные права: read:packages"
-    echo ""
-    read -sp "$(printf "${YELLOW}GitHub Personal Access Token: ${NC}")" GHCR_TOKEN
-    echo ""
-    if echo "$GHCR_TOKEN" | docker login ghcr.io -u pedzeo --password-stdin 2>/dev/null; then
-        print_success "Авторизация успешна"
+print_info "Скачивание образа ${IMAGE}..."
+
+# Пробуем скачать без авторизации (для публичных образов)
+if docker compose pull 2>&1 | tee /tmp/pull_output.log; then
+    print_success "Образ скачан успешно"
+else
+    # Проверяем, действительно ли нужна авторизация
+    if grep -q "unauthorized\|denied\|authentication required" /tmp/pull_output.log 2>/dev/null; then
+        echo ""
+        print_warning "Образ требует авторизацию в GitHub Container Registry"
+        print_info "Это может быть потому что:"
+        print_info "  1. Образ находится в приватном репозитории"
+        print_info "  2. GitHub временно ограничил анонимный доступ"
+        echo ""
+        print_info "Для авторизации нужен GitHub Personal Access Token:"
+        print_info "  1. Перейди: https://github.com/settings/tokens/new"
+        print_info "  2. Название: bedolagaban-agent"
+        print_info "  3. Права: read:packages"
+        print_info "  4. Скопируй токен"
+        echo ""
+
+        if ask_yes_no "Хочешь авторизоваться сейчас?"; then
+            read -sp "$(printf "${YELLOW}GitHub Personal Access Token: ${NC}")" GHCR_TOKEN
+            echo ""
+            if echo "$GHCR_TOKEN" | docker login ghcr.io -u pedzeo --password-stdin 2>/dev/null; then
+                print_success "Авторизация успешна"
+                print_info "Повторная попытка скачивания..."
+                if docker compose pull; then
+                    print_success "Образ скачан успешно"
+                else
+                    print_error "Не удалось скачать образ даже после авторизации"
+                    print_info "Свяжись с администратором или проверь настройки репозитория"
+                    exit 1
+                fi
+            else
+                print_error "Не удалось авторизоваться"
+                print_info "Проверь токен и попробуй снова"
+                exit 1
+            fi
+        else
+            print_warning "Установка прервана. Авторизация обязательна для этого образа."
+            exit 1
+        fi
     else
-        print_error "Не удалось авторизоваться в GHCR"
+        # Другая ошибка (сеть, неверный тег и т.п.)
+        print_error "Не удалось скачать образ"
+        print_info "Возможные причины:"
+        print_info "  - Проблемы с сетью"
+        print_info "  - Образ не существует: ${IMAGE}"
+        print_info "  - GitHub Container Registry недоступен"
+        echo ""
+        print_info "Логи ошибки:"
+        cat /tmp/pull_output.log 2>/dev/null || echo "(нет логов)"
         exit 1
     fi
 fi
-
-print_info "Скачивание образа..."
-docker compose pull
+rm -f /tmp/pull_output.log 2>/dev/null
 
 echo ""
 print_info "Запуск агента..."
