@@ -98,4 +98,4 @@ docker compose pull && docker compose up -d          # Обновление
 
 Коммерческое ПО. Все права защищены.
 
-Для приобретения лицензии: [@pedzeeo](https://t.me/pedzeeo)
+Для приобретения лицензии: [@pedzeeo](https://t.me/bedolagaban )
