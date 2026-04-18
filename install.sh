@@ -219,11 +219,11 @@ while true; do
 done
 
 echo ""
-print_info "JWT токен можно скопировать из настроек панели"
-PANEL_TOKEN=$(ask_question "JWT токен от Remnawave Panel:")
+print_info "API токен можно скопировать из настроек панели"
+PANEL_TOKEN=$(ask_question "API токен от Remnawave Panel:")
 while [ -z "$PANEL_TOKEN" ]; do
     print_warning "Токен обязателен!"
-    PANEL_TOKEN=$(ask_question "JWT токен от Remnawave Panel:")
+    PANEL_TOKEN=$(ask_question "API токен от Remnawave Panel:")
 done
 
 echo ""
