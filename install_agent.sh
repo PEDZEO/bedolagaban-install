@@ -171,29 +171,6 @@ while [ -z "$AGENT_TOKEN" ]; do
     AGENT_TOKEN=$(ask_question "Токен агента:")
 done
 
-# LICENSE_KEY
-echo ""
-print_info "Лицензионный ключ получен при покупке"
-print_info "Формат: BB-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-LICENSE_KEY=$(ask_question "Лицензионный ключ:")
-while true; do
-    if [[ "$LICENSE_KEY" =~ ^BB-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$ ]]; then
-        print_success "Формат ключа корректный"
-        break
-    else
-        print_error "Неверный формат! Ожидается: BB-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-        LICENSE_KEY=$(ask_question "Лицензионный ключ:")
-    fi
-done
-
-# TLS
-echo ""
-if ask_yes_no "Использовать TLS шифрование?"; then
-    TLS_ENABLED="true"
-else
-    TLS_ENABLED="false"
-fi
-
 # Шаг 4: Настройка логов
 echo ""
 print_info "Шаг 4/5: Настройка логов"
@@ -223,6 +200,29 @@ else
 fi
 
 check_node_logs "$LOG_DIR"
+
+# LICENSE_KEY
+echo ""
+print_info "Лицензионный ключ получен при покупке"
+print_info "Формат: BB-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+LICENSE_KEY=$(ask_question "Лицензионный ключ:")
+while true; do
+    if [[ "$LICENSE_KEY" =~ ^BB-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$ ]]; then
+        print_success "Формат ключа корректный"
+        break
+    else
+        print_error "Неверный формат! Ожидается: BB-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+        LICENSE_KEY=$(ask_question "Лицензионный ключ:")
+    fi
+done
+
+# TLS
+echo ""
+if ask_yes_no "Использовать TLS шифрование?"; then
+    TLS_ENABLED="true"
+else
+    TLS_ENABLED="false"
+fi
 
 # Профиль нагрузки
 echo ""
