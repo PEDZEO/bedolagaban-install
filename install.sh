@@ -226,6 +226,12 @@ while [ -z "$PANEL_TOKEN" ]; do
     PANEL_TOKEN=$(ask_question "JWT токен от Remnawave Panel:")
 done
 
+echo ""
+print_info "PANEL_SECRET_KEY можно указать, если панель закрыта через reverse-proxy"
+print_info "Формат: cookie_name:cookie_value"
+print_info "Пример: UinFiwLL:QHxwyZyP"
+PANEL_SECRET_KEY=$(ask_question "PANEL_SECRET_KEY (необязательно, Enter чтобы пропустить):")
+
 # --- Telegram Bot ---
 echo ""
 print_header "Настройка Telegram бота"
@@ -621,6 +627,11 @@ echo ""
 print_info "  API_TOKEN: ${API_TOKEN:0:10}..."
 print_info "  AGENT_TOKEN: ${AGENT_TOKEN:0:10}..."
 print_info "  PANEL_URL: $PANEL_URL"
+if [ -n "$PANEL_SECRET_KEY" ]; then
+    print_info "  PANEL_SECRET_KEY: [set]"
+else
+    print_info "  PANEL_SECRET_KEY: [not set]"
+fi
 print_info "  TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:0:10}..."
 print_info "  TELEGRAM_ADMIN_IDS: $TELEGRAM_ADMIN_IDS"
 print_info "  TLS_ENABLED: $TLS_ENABLED"
@@ -649,6 +660,7 @@ AGENT_TOKEN=$AGENT_TOKEN
 # === Remnawave Panel ===
 PANEL_URL=$PANEL_URL
 PANEL_TOKEN=$PANEL_TOKEN
+PANEL_SECRET_KEY=$PANEL_SECRET_KEY
 PANEL_VERIFY_SSL=true
 PANEL_SYNC_INTERVAL=60
 
