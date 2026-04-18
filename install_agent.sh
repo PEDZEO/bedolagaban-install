@@ -44,6 +44,52 @@ ask_yes_no() {
     done
 }
 
+check_node_logs() {
+    local log_dir="$1"
+    local access_log="${log_dir}/access.log"
+    local error_log="${log_dir}/error.log"
+    local access_ok=0
+    local error_ok=0
+
+    echo ""
+    print_info "Проверка логов ноды в ${log_dir}"
+
+    if [ -f "$access_log" ]; then
+        local access_size
+        access_size=$(wc -c < "$access_log" 2>/dev/null || echo 0)
+        print_success "Найден access.log (${access_size} байт)"
+        if [ "$access_size" -gt 0 ]; then
+            access_ok=1
+        fi
+    else
+        print_warning "Не найден файл ${access_log}"
+    fi
+
+    if [ -f "$error_log" ]; then
+        local error_size
+        error_size=$(wc -c < "$error_log" 2>/dev/null || echo 0)
+        print_success "Найден error.log (${error_size} байт)"
+        if [ "$error_size" -gt 0 ]; then
+            error_ok=1
+        fi
+    else
+        print_warning "Не найден файл ${error_log}"
+    fi
+
+    if [ ! -f "$access_log" ] || [ ! -f "$error_log" ] || { [ "$access_ok" -eq 0 ] && [ "$error_ok" -eq 0 ]; }; then
+        echo ""
+        print_warning "Похоже, что логи ноды не пишутся или запись логов не настроена"
+        print_warning "Проверь конфиг Xray/RemnaNode и включи запись логов, например:"
+        echo '  "log": {'
+        echo '    "error": "/var/log/remnanode/error.log",'
+        echo '    "access": "/var/log/remnanode/access.log",'
+        echo '    "loglevel": "info"'
+        echo '  }'
+        echo ""
+        print_warning "Без access.log и error.log агент не сможет нормально читать подключения"
+    fi
+}
+
 # ========================================
 clear
 cat << "EOF"
@@ -175,6 +221,8 @@ else
         LOG_DIR=$(ask_question "Директория логов:")
     done
 fi
+
+check_node_logs "$LOG_DIR"
 
 # Профиль нагрузки
 echo ""
