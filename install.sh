@@ -65,6 +65,150 @@ generate_random_token() {
     openssl rand -base64 32 2>/dev/null | tr -d "=+/" | cut -c1-32 || head -c 64 /dev/urandom | od -An -tx1 | tr -d ' \n' | head -c 32
 }
 
+resolve_domain_ips() {
+    local domain="$1"
+    if command -v getent &> /dev/null; then
+        getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u
+        return
+    fi
+    if command -v dig &> /dev/null; then
+        dig +short A "$domain" 2>/dev/null | sort -u
+        return
+    fi
+    if command -v nslookup &> /dev/null; then
+        nslookup "$domain" 2>/dev/null | awk '/^Address: / {print $2}' | sort -u
+        return
+    fi
+}
+
+detect_public_ips() {
+    local detected_ips=""
+    if command -v hostname &> /dev/null; then
+        detected_ips=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | grep -vE '^(127|10|192\.168|172\.(1[6-9]|2[0-9]|3[0-1]))\.' | sort -u)
+    fi
+
+    if [ -z "$detected_ips" ] && command -v ip &> /dev/null; then
+        detected_ips=$(ip -4 addr show scope global 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1 | sort -u)
+    fi
+
+    echo "$detected_ips"
+}
+
+check_domain_points_here() {
+    local domain="$1"
+    local domain_ips
+    local server_ips
+
+    domain_ips=$(resolve_domain_ips "$domain")
+    server_ips=$(detect_public_ips)
+
+    if [ -z "$domain_ips" ]; then
+        print_warning "Не удалось определить IP для домена $domain"
+        print_info "Проверь DNS-запись вручную перед включением TLS"
+        return
+    fi
+
+    print_info "IP домена $domain: $(echo "$domain_ips" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+
+    if [ -z "$server_ips" ]; then
+        print_warning "Не удалось определить внешний IP этого сервера"
+        print_info "Проверь, что домен указывает на нужную машину"
+        return
+    fi
+
+    print_info "IP сервера: $(echo "$server_ips" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+
+    while IFS= read -r domain_ip; do
+        [ -z "$domain_ip" ] && continue
+        if echo "$server_ips" | grep -qx "$domain_ip"; then
+            print_success "Домен $domain указывает на этот сервер"
+            return
+        fi
+    done <<< "$domain_ips"
+
+    print_warning "Домен $domain не указывает на текущий сервер"
+    print_info "Агенты могут не подключиться по TLS, пока DNS не будет исправлен"
+}
+
+validate_tls_pair() {
+    local cert_path="$1"
+    local key_path="$2"
+
+    if ! command -v openssl &> /dev/null; then
+        print_warning "OpenSSL не найден, полную проверку сертификата и ключа пропускаю"
+        return
+    fi
+
+    if [ -f "$cert_path" ]; then
+        if openssl x509 -in "$cert_path" -noout > /dev/null 2>&1; then
+            print_success "Сертификат читается корректно"
+        else
+            print_warning "Файл сертификата найден, но OpenSSL не может его прочитать"
+        fi
+    fi
+
+    if [ -f "$key_path" ]; then
+        if openssl pkey -in "$key_path" -noout > /dev/null 2>&1; then
+            print_success "Приватный ключ читается корректно"
+        else
+            print_warning "Файл ключа найден, но OpenSSL не может его прочитать"
+        fi
+    fi
+
+    if [ -f "$cert_path" ] && [ -f "$key_path" ]; then
+        local cert_mod
+        local key_mod
+        cert_mod=$(openssl x509 -noout -modulus -in "$cert_path" 2>/dev/null | openssl md5 2>/dev/null | awk '{print $2}')
+        key_mod=$(openssl rsa -noout -modulus -in "$key_path" 2>/dev/null | openssl md5 2>/dev/null | awk '{print $2}')
+
+        if [ -n "$cert_mod" ] && [ -n "$key_mod" ]; then
+            if [ "$cert_mod" = "$key_mod" ]; then
+                print_success "Сертификат и ключ подходят друг к другу"
+            else
+                print_warning "Сертификат и ключ не совпадают"
+            fi
+        else
+            print_warning "Не удалось сравнить сертификат и ключ"
+        fi
+
+        local cert_end
+        cert_end=$(openssl x509 -enddate -noout -in "$cert_path" 2>/dev/null | cut -d= -f2-)
+        if [ -n "$cert_end" ]; then
+            print_info "Сертификат действует до: $cert_end"
+        fi
+    fi
+}
+
+find_nginx_cert_paths() {
+    local domain="$1"
+    local cert_candidate=""
+    local key_candidate=""
+    local cert_name="${domain}.crt"
+    local key_name="${domain}.key"
+
+    if [ -f "/etc/letsencrypt/live/$domain/fullchain.pem" ]; then
+        cert_candidate="/etc/letsencrypt/live/$domain/fullchain.pem"
+    elif [ -f "/etc/letsencrypt/live/$domain/cert.pem" ]; then
+        cert_candidate="/etc/letsencrypt/live/$domain/cert.pem"
+    elif [ -f "/etc/nginx/ssl/$cert_name" ]; then
+        cert_candidate="/etc/nginx/ssl/$cert_name"
+    elif [ -f "/etc/ssl/certs/$cert_name" ]; then
+        cert_candidate="/etc/ssl/certs/$cert_name"
+    fi
+
+    if [ -f "/etc/letsencrypt/live/$domain/privkey.pem" ]; then
+        key_candidate="/etc/letsencrypt/live/$domain/privkey.pem"
+    elif [ -f "/etc/nginx/ssl/$key_name" ]; then
+        key_candidate="/etc/nginx/ssl/$key_name"
+    elif [ -f "/etc/ssl/private/$key_name" ]; then
+        key_candidate="/etc/ssl/private/$key_name"
+    fi
+
+    if [ -n "$cert_candidate" ] || [ -n "$key_candidate" ]; then
+        echo "$cert_candidate|$key_candidate"
+    fi
+}
+
 # Начало установки
 clear
 cat << "EOF"
@@ -304,15 +448,17 @@ if ask_yes_no "Включить TLS шифрование?"; then
     echo ""
     print_info "Выбери источник сертификатов:"
     echo "  1) Caddy (автоопределение Let's Encrypt сертификатов)"
-    echo "  2) Указать путь вручную (Nginx, Certbot, любой другой)"
+    echo "  2) Nginx / Certbot (автопоиск типовых путей)"
+    echo "  3) Указать путь вручную"
     echo ""
 
     while true; do
-        TLS_MODE=$(ask_question "Выбери (1 или 2):")
+        TLS_MODE=$(ask_question "Выбери (1, 2 или 3):")
         case $TLS_MODE in
             1) TLS_MODE="caddy"; break;;
-            2) TLS_MODE="manual"; break;;
-            *) print_warning "Выбери 1 или 2";;
+            2) TLS_MODE="nginx"; break;;
+            3) TLS_MODE="manual"; break;;
+            *) print_warning "Выбери 1, 2 или 3";;
         esac
     done
 
@@ -413,6 +559,67 @@ if ask_yes_no "Включить TLS шифрование?"; then
             print_warning "Путь не существует: $CADDY_DATA_PATH"
         fi
 
+    elif [ "$TLS_MODE" = "nginx" ]; then
+        echo ""
+        print_info "Например: agent.example.com"
+        TLS_DOMAIN=$(ask_question "Домен для агентов:")
+        while [ -z "$TLS_DOMAIN" ]; do
+            print_warning "Домен обязателен для TLS"
+            TLS_DOMAIN=$(ask_question "Домен для агентов:")
+        done
+
+        echo ""
+        print_info "Проверяю DNS домена и ищу сертификаты Nginx/Certbot"
+        check_domain_points_here "$TLS_DOMAIN"
+
+        FOUND_NGINX_PAIR=$(find_nginx_cert_paths "$TLS_DOMAIN")
+        if [ -n "$FOUND_NGINX_PAIR" ]; then
+            TLS_CERT_PATH="${FOUND_NGINX_PAIR%%|*}"
+            TLS_KEY_PATH="${FOUND_NGINX_PAIR##*|}"
+
+            [ -n "$TLS_CERT_PATH" ] && print_success "Найден сертификат: $TLS_CERT_PATH"
+            [ -n "$TLS_KEY_PATH" ] && print_success "Найден ключ: $TLS_KEY_PATH"
+        else
+            print_warning "Типовые пути Nginx/Certbot не найдены автоматически"
+        fi
+
+        if [ -z "$TLS_CERT_PATH" ]; then
+            TLS_CERT_PATH=$(ask_question "Путь к сертификату (.crt/.pem):")
+        else
+            TLS_CERT_PATH=$(ask_question "Путь к сертификату (.crt/.pem) (Enter для '$TLS_CERT_PATH'):")
+            TLS_CERT_PATH=${TLS_CERT_PATH:-${FOUND_NGINX_PAIR%%|*}}
+        fi
+        while [ -z "$TLS_CERT_PATH" ]; do
+            print_warning "Путь обязателен!"
+            TLS_CERT_PATH=$(ask_question "Путь к сертификату (.crt/.pem):")
+        done
+
+        if [ -n "${FOUND_NGINX_PAIR##*|}" ]; then
+            TLS_KEY_PATH=$(ask_question "Путь к приватному ключу (.key/.pem) (Enter для '${FOUND_NGINX_PAIR##*|}'):")
+            TLS_KEY_PATH=${TLS_KEY_PATH:-${FOUND_NGINX_PAIR##*|}}
+        else
+            TLS_KEY_PATH=$(ask_question "Путь к приватному ключу (.key/.pem):")
+        fi
+        while [ -z "$TLS_KEY_PATH" ]; do
+            print_warning "Путь обязателен!"
+            TLS_KEY_PATH=$(ask_question "Путь к приватному ключу (.key/.pem):")
+        done
+
+        if [ -f "$TLS_CERT_PATH" ]; then
+            print_success "Сертификат найден: $TLS_CERT_PATH"
+        else
+            print_warning "Файл не найден: $TLS_CERT_PATH"
+        fi
+
+        if [ -f "$TLS_KEY_PATH" ]; then
+            print_success "Ключ найден: $TLS_KEY_PATH"
+        else
+            print_warning "Файл не найден: $TLS_KEY_PATH"
+        fi
+
+        validate_tls_pair "$TLS_CERT_PATH" "$TLS_KEY_PATH"
+        print_info "Для Nginx порт 9999 нужно проксировать через stream {}, а не через обычный location {}"
+        print_info "Если stream не настроен, агенты не подключатся даже при рабочем HTTPS сайте"
     else
         # ===== Ручной режим (Nginx, Certbot, и др.) =====
         echo ""
@@ -448,6 +655,8 @@ if ask_yes_no "Включить TLS шифрование?"; then
             print_warning "Файл не найден: $TLS_KEY_PATH"
             print_info "Убедись что путь правильный перед запуском"
         fi
+
+        validate_tls_pair "$TLS_CERT_PATH" "$TLS_KEY_PATH"
     fi
 
     TLS_ENABLED="true"
