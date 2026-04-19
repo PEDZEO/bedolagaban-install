@@ -177,28 +177,121 @@ bash <(curl -fsSL https://raw.githubusercontent.com/PEDZEO/bedolagaban-install/m
 туда попадают, ниже есть готовые примеры.
 
 <details>
-<summary>Сервер BedolagaBan: минимальный пример `.env`</summary>
+<summary>Сервер BedolagaBan: почти полный рабочий пример `.env`</summary>
 
 ```env
+# HTTP / TCP
+HTTP_HOST=0.0.0.0
+HTTP_PORT=8080
+TCP_HOST=0.0.0.0
+TCP_PORT=9999
+TCP_WORKERS=4
+TCP_QUEUE_MAXSIZE=5000
+
 # Токены
 API_TOKEN=твой_секретный_токен_минимум_32_символа
+API_TOKEN_READ=
+API_TOKEN_WRITE=
 AGENT_TOKEN=токен_для_всех_агентов
+
+# TLS для агентов
+TLS_ENABLED=true
+TLS_DOMAIN=agent.example.com
+CADDY_DATA_PATH=/var/lib/docker/volumes/caddy_data/_data
+
+# PostgreSQL
+POSTGRES_ENABLED=true
+COMPOSE_PROFILES=postgres
+POSTGRES_HOST=postgres
+POSTGRES_PORT=5432
+POSTGRES_DB=banhammer
+POSTGRES_USER=banhammer
+POSTGRES_PASSWORD=your_secure_password_here
+POSTGRES_POOL_MIN=2
+POSTGRES_POOL_MAX=10
+POSTGRES_CACHE_SIZE=15000
+
+# Кэш панели и IP окно
+PANEL_USERS_CACHE_LIMIT=10000
+IP_TTL_MINUTES=30
+IP_WINDOW_SECONDS=60
 
 # Remnawave Panel
 PANEL_URL=https://panel.example.com
 PANEL_TOKEN=твой_api_токен_панели
+PANEL_VERIFY_SSL=true
+PANEL_SYNC_INTERVAL=60
+PANEL_MAX_FAILURES=5
+PANEL_COOLDOWN_SECONDS=60
 
 # Если панель закрыта через reverse-proxy / nginx cookie:
 # PANEL_SECRET_KEY=UinFiwLL:QHxwyZyP
 
 # Telegram
 TELEGRAM_BOT_TOKEN=токен_от_botfather
-TELEGRAM_ADMIN_IDS=123456789
+TELEGRAM_ADMIN_IDS=123456789,987654321
+TELEGRAM_NOTIFY_CHAT=-1001234567890
+TELEGRAM_TOPIC_ID=
+NOTIFIER_TIMEZONE=Europe/Moscow
+NOTIFIER_TZ_OFFSET_MINUTES=
 
-# TLS для агентов
-TLS_ENABLED=true
-TLS_DOMAIN=agent.example.com
+# Уведомления пользователям через BedolagaBot
+MAIN_BOT_API_URL=http://bedolaga-bot:8080
+MAIN_BOT_API_KEY=твой_api_ключ_от_бота
+
+# Наказания
+PUNISHMENT_ENABLED=true
+PUNISHMENT_MINUTES=5
+OBSERVATION_SECONDS=60
+NOTIFY_ON_PUNISHMENT=true
+DAILY_REPORT_ENABLED=true
+DAILY_REPORT_HOUR=9
+NOTIFY_ON_NODE_STATUS=true
+
+# База данных и heartbeat
+DB_PATH=data/bedolagaban.db
+HEARTBEAT_TIMEOUT=90
+RATE_LIMIT_MAX=1000
+RATE_LIMIT_WINDOW=10
+
+# Защита от сканеров
+SCANNER_BAN_THRESHOLD=3
+SCANNER_BAN_DURATION=3600
+
+# Whitelist
+WHITELIST=admin,vip_user,123456
+
+# Прогрессивные баны
+PROGRESSIVE_BANS_ENABLED=true
+PROGRESSIVE_BAN_1=5
+PROGRESSIVE_BAN_2=15
+PROGRESSIVE_BAN_3=60
+PROGRESSIVE_BAN_WINDOW_HOURS=24
+
+# Мониторинг трафика
+TRAFFIC_MONITOR_ENABLED=true
+TRAFFIC_LIMIT_GB=100
+TRAFFIC_WINDOW_MINUTES=60
+TRAFFIC_CHECK_INTERVAL=5
+TRAFFIC_BAN_MINUTES=60
+
+# Мониторинг типа сети
+NETWORK_DETECTION_ENABLED=true
+NETWORK_DETECTION_NODES=
+NETWORK_DETECTION_MONITOR_ALL=true
+NETWORK_DETECTION_COLLECT_ALL=false
+NETWORK_NOTIFY_MOBILE=false
+NETWORK_BLOCK_MOBILE=false
+NETWORK_BLOCK_MOBILE_MINUTES=30
+NETWORK_NOTIFY_WIFI=false
+NETWORK_BLOCK_WIFI=false
+NETWORK_BLOCK_WIFI_MINUTES=30
 ```
+
+Важно: если в `.env` отключены `PUNISHMENT_ENABLED`, `NETWORK_BLOCK_WIFI`,
+`NETWORK_BLOCK_MOBILE`, `TRAFFIC_MONITOR_ENABLED` и другие механики, одних
+переключателей в боте недостаточно. Бот управляет системой, но сами функции
+должны быть разрешены в конфиге.
 
 </details>
 
@@ -218,9 +311,12 @@ AGENT_TOKEN=токен_для_всех_агентов
 
 # Для домена с TLS
 TLS_ENABLED=true
+HEARTBEAT_INTERVAL=30
+RECONNECT_DELAY=5
 
 # Папка с логами Xray / RemnaNode
 LOG_DIR=/var/log/remnanode
+LOG_PATTERN=*.log
 ```
 
 </details>
@@ -239,8 +335,11 @@ AGENT_TOKEN=токен_для_всех_агентов
 
 # Без домена TLS нужно отключить
 TLS_ENABLED=false
+HEARTBEAT_INTERVAL=30
+RECONNECT_DELAY=5
 
 LOG_DIR=/var/log/remnanode
+LOG_PATTERN=*.log
 ```
 
 </details>
