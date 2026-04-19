@@ -329,6 +329,7 @@ echo ""
 print_header "Лицензионный ключ"
 echo ""
 print_info "Введи лицензионный ключ, полученный при покупке"
+print_info "Пробный ключ можно получить на сайте: https://shop.pedze.ru/"
 print_info "Формат: BB-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 echo ""
 LICENSE_KEY=$(ask_question "Лицензионный ключ:")

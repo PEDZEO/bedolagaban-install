@@ -109,6 +109,7 @@ BedolagaBan нужен для контроля пользователей VPN и
 - Linux сервер: Ubuntu 20.04+ / Debian 11+ / совместимый дистрибутив
 - Docker и Docker Compose v2
 - лицензионный ключ BedolagaBan
+- пробный ключ можно получить на сайте: [shop.pedze.ru](https://shop.pedze.ru/)
 - URL твоей Remnawave Panel
 - API токен панели
 - Telegram bot token от `@BotFather`
@@ -140,6 +141,12 @@ BedolagaBan нужен для контроля пользователей VPN и
 
 Если `PANEL_SECRET_KEY` не нужен, просто нажми `Enter` и установка продолжится
 по старому сценарию.
+
+---
+
+> [!IMPORTANT]
+> Если у тебя нет ключа, пробный ключ можно получить на сайте:
+> [shop.pedze.ru](https://shop.pedze.ru/)
 
 ---
 

@@ -204,6 +204,7 @@ check_node_logs "$LOG_DIR"
 # LICENSE_KEY
 echo ""
 print_info "Лицензионный ключ получен при покупке"
+print_info "Пробный ключ можно получить на сайте: https://shop.pedze.ru/"
 print_info "Формат: BB-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 LICENSE_KEY=$(ask_question "Лицензионный ключ:")
 while true; do
