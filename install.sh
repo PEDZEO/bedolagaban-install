@@ -466,6 +466,8 @@ if ask_yes_no "Включить TLS шифрование?"; then
         # ===== Режим Caddy =====
         echo ""
         print_info "Например: agent.example.com"
+        print_info "Этот домен должен указывать именно на текущий сервер, куда ты ставишь BedolagaBan"
+        print_info "Именно сюда будут подключаться все агенты VPN нод"
         TLS_DOMAIN=$(ask_question "Домен для агентов:")
 
         echo ""
@@ -562,6 +564,8 @@ if ask_yes_no "Включить TLS шифрование?"; then
     elif [ "$TLS_MODE" = "nginx" ]; then
         echo ""
         print_info "Например: agent.example.com"
+        print_info "Этот домен должен указывать именно на текущий сервер, куда ты ставишь BedolagaBan"
+        print_info "Именно сюда будут подключаться все агенты VPN нод"
         TLS_DOMAIN=$(ask_question "Домен для агентов:")
         while [ -z "$TLS_DOMAIN" ]; do
             print_warning "Домен обязателен для TLS"
@@ -721,21 +725,21 @@ else
     print_info "Автобаны отключены"
 fi
 
-# --- Интеграция с основным ботом ---
+# --- Интеграция с BedolagaBot ---
 echo ""
-print_header "Интеграция с основным ботом (опционально)"
+print_header "Интеграция с BedolagaBot (опционально)"
 echo ""
-print_info "Для отправки уведомлений пользователям через основной бот"
+print_info "Для отправки уведомлений пользователям через BedolagaBot"
 echo ""
-if ask_yes_no "Интегрировать с основным ботом?"; then
+if ask_yes_no "Интегрировать с BedolagaBot?"; then
     echo ""
-    MAIN_BOT_API_URL=$(ask_question "URL API основного бота:")
+    MAIN_BOT_API_URL=$(ask_question "URL API BedolagaBot:")
     echo ""
-    MAIN_BOT_API_KEY=$(ask_question "API ключ основного бота:")
+    MAIN_BOT_API_KEY=$(ask_question "API ключ BedolagaBot:")
 else
     MAIN_BOT_API_URL=""
     MAIN_BOT_API_KEY=""
-    print_info "Интеграция с основным ботом отключена"
+    print_info "Интеграция с BedolagaBot отключена"
 fi
 
 # --- PostgreSQL ---
