@@ -179,6 +179,27 @@ validate_tls_pair() {
     fi
 }
 
+prepare_tls_paths_for_container() {
+    local source_cert="$1"
+    local source_key="$2"
+    local target_dir="${INSTALL_DIR}/data/certs"
+    local target_cert="${target_dir}/$(basename "$source_cert")"
+    local target_key="${target_dir}/$(basename "$source_key")"
+
+    mkdir -p "$target_dir"
+    cp -f "$source_cert" "$target_cert"
+    cp -f "$source_key" "$target_key"
+    chown 999:999 "$target_cert" "$target_key" 2>/dev/null || true
+    chmod 600 "$target_cert" "$target_key" 2>/dev/null || true
+
+    TLS_CERT_PATH="/app/data/certs/$(basename "$source_cert")"
+    TLS_KEY_PATH="/app/data/certs/$(basename "$source_key")"
+    CADDY_DATA_PATH=""
+
+    print_success "TLS сертификаты скопированы в ${target_dir}"
+    print_info "Контейнер будет использовать: $TLS_CERT_PATH и $TLS_KEY_PATH"
+}
+
 find_nginx_cert_paths() {
     local domain="$1"
     local cert_candidate=""
@@ -552,8 +573,14 @@ if ask_yes_no "Включить TLS шифрование?"; then
         if [ -d "$CADDY_DATA_PATH" ]; then
             print_success "Путь существует: $CADDY_DATA_PATH"
             DOMAIN_CERT="$CADDY_DATA_PATH/certificates/acme-v02.api.letsencrypt.org-directory/$TLS_DOMAIN/$TLS_DOMAIN.crt"
+            DOMAIN_KEY="$CADDY_DATA_PATH/certificates/acme-v02.api.letsencrypt.org-directory/$TLS_DOMAIN/$TLS_DOMAIN.key"
             if [ -f "$DOMAIN_CERT" ]; then
                 print_success "Сертификат для $TLS_DOMAIN найден!"
+                if [ -f "$DOMAIN_KEY" ]; then
+                    prepare_tls_paths_for_container "$DOMAIN_CERT" "$DOMAIN_KEY"
+                else
+                    print_warning "Ключ для $TLS_DOMAIN не найден рядом с сертификатом"
+                fi
             else
                 print_warning "Сертификат для $TLS_DOMAIN НЕ найден"
                 print_info "Добавь домен в Caddyfile и перезапусти Caddy"
@@ -623,6 +650,7 @@ if ask_yes_no "Включить TLS шифрование?"; then
         fi
 
         validate_tls_pair "$TLS_CERT_PATH" "$TLS_KEY_PATH"
+        prepare_tls_paths_for_container "$TLS_CERT_PATH" "$TLS_KEY_PATH"
         print_info "Для Nginx порт 9999 нужно проксировать через stream {}, а не через обычный location {}"
         print_info "Если stream не настроен, агенты не подключатся даже при рабочем HTTPS сайте"
     else
@@ -662,6 +690,7 @@ if ask_yes_no "Включить TLS шифрование?"; then
         fi
 
         validate_tls_pair "$TLS_CERT_PATH" "$TLS_KEY_PATH"
+        prepare_tls_paths_for_container "$TLS_CERT_PATH" "$TLS_KEY_PATH"
     fi
 
     TLS_ENABLED="true"
@@ -974,9 +1003,8 @@ if [ "$TLS_ENABLED" = "true" ]; then
         # Caddy mode: монтируем директорию данных Caddy
         TLS_VOLUME="      - ${CADDY_DATA_PATH}:/caddy_data:ro"
     elif [ -n "$TLS_CERT_PATH" ]; then
-        # Manual mode: монтируем директорию с сертификатами
-        CERT_DIR=$(dirname "$TLS_CERT_PATH")
-        TLS_VOLUME="      - ${CERT_DIR}:${CERT_DIR}:ro"
+        # Явные cert/key уже лежат в ./data/certs и доступны через ./data:/app/data
+        TLS_VOLUME=""
     fi
 fi
 
