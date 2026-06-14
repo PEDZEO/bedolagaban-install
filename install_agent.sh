@@ -85,6 +85,39 @@ ensure_env_value() {
     printf '%s=%s\n' "$key" "$value" >> "$file"
 }
 
+detect_log_dir() {
+    for log_path in "/var/log/remnanode" "/opt/remnanode/logs" "/var/log/xray" "/var/log/3x-ui"; do
+        if [ -d "$log_path" ]; then
+            echo "$log_path"
+            return 0
+        fi
+    done
+    echo "/var/log/remnanode"
+}
+
+find_existing_install_dir() {
+    local candidate
+    local checked="|"
+    for candidate in \
+        "${INSTALL_DIR}" \
+        "/opt/banhammer-agent" \
+        "/opt/bedolagaban-agent" \
+        "/opt/bedolaga-agent" \
+        "/root/banhammer-agent" \
+        "$(pwd)"; do
+        [ -n "$candidate" ] || continue
+        case "$checked" in
+            *"|${candidate}|"*) continue ;;
+        esac
+        checked="${checked}${candidate}|"
+        if [ -f "${candidate}/.env" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
 write_agent_compose() {
     cat > "${INSTALL_DIR}/docker-compose.yml" << COMPOSE
 services:
@@ -138,6 +171,8 @@ upgrade_existing_runtime() {
         cp "${INSTALL_DIR}/docker-compose.yml" "${INSTALL_DIR}/docker-compose.yml.bak.$(date +%Y%m%d%H%M%S)"
     fi
 
+    ensure_env_value "$env_file" LOG_DIR "$(detect_log_dir)"
+    ensure_env_value "$env_file" LOG_PATTERN "*.log"
     set_env_value "$env_file" SUSPICIOUS_DESTINATION_AGENT_GUARD_ENABLED true
     set_env_value "$env_file" SUSPICIOUS_DESTINATION_AGENT_BLOCK_ENABLED false
     ensure_env_value "$env_file" SUSPICIOUS_DESTINATION_BLOCK_COMMAND ""
@@ -225,9 +260,27 @@ check_node_logs() {
     fi
 }
 
-if [ "${1:-}" = "--upgrade-runtime" ] || [ "${AUTO_UPGRADE_RUNTIME:-}" = "1" ]; then
+if [ "${1:-}" = "--upgrade-runtime" ] || [ "${1:-}" = "--update" ] || [ "${1:-}" = "update" ] || [ "${AUTO_UPGRADE_RUNTIME:-}" = "1" ]; then
+    if [ ! -f "${INSTALL_DIR}/.env" ]; then
+        FOUND_INSTALL_DIR=$(find_existing_install_dir || true)
+        if [ -n "$FOUND_INSTALL_DIR" ]; then
+            INSTALL_DIR="$FOUND_INSTALL_DIR"
+        fi
+    fi
     upgrade_existing_runtime
     exit 0
+fi
+
+if [ "${1:-}" != "--reinstall" ] && [ "${1:-}" != "--install" ]; then
+    FOUND_INSTALL_DIR=$(find_existing_install_dir || true)
+    if [ -n "$FOUND_INSTALL_DIR" ]; then
+        INSTALL_DIR="$FOUND_INSTALL_DIR"
+        echo ""
+        print_info "Найден установленный BedolagaBan Agent: ${INSTALL_DIR}"
+        print_info "Запускаю обновление runtime, compose и образа агента"
+        upgrade_existing_runtime
+        exit 0
+    fi
 fi
 
 # ========================================
