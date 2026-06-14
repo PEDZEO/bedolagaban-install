@@ -149,12 +149,54 @@ services:
 COMPOSE
 }
 
+verify_agent_runtime() {
+    print_info "Проверяю, что агент поднялся..."
+    if docker inspect -f '{{.State.Running}}' banhammer-agent 2>/dev/null | grep -q "true"; then
+        print_success "Контейнер banhammer-agent запущен"
+    else
+        print_error "Контейнер banhammer-agent не запущен"
+        docker compose logs --tail=80 || true
+        exit 1
+    fi
+
+    local agent_version
+    agent_version=$(docker exec banhammer-agent sh -lc 'cat /app/VERSION 2>/dev/null || true' 2>/dev/null | tr -d '\r' | head -n 1)
+    if [ -n "$agent_version" ]; then
+        print_success "Версия агента: ${agent_version}"
+    fi
+
+    if docker exec banhammer-agent sh -lc 'test -S /var/run/docker.sock' 2>/dev/null; then
+        print_success "Docker socket доступен агенту"
+    else
+        print_warning "Docker socket не виден внутри агента; Remnawave auto-setup может не сработать"
+    fi
+
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "remnanode"; then
+        if docker exec remnanode rw-core api lsrules --server=127.0.0.1:61001 >/dev/null 2>&1; then
+            print_success "Xray API bridge отвечает"
+        else
+            print_warning "Xray API bridge пока не отвечает; агент попробует подготовить его после получения настроек"
+        fi
+    else
+        print_warning "Контейнер remnanode не найден; проверка Xray API bridge пропущена"
+    fi
+
+    echo ""
+    print_info "Последние логи агента:"
+    docker compose logs --tail=30 || true
+    echo ""
+    print_success "Готово: агент обновлен и работает"
+}
+
 upgrade_existing_runtime() {
     local env_file="${INSTALL_DIR}/.env"
+    echo ""
+    print_info "Обновление BedolagaBan Agent: ${INSTALL_DIR}"
     if [ ! -f "$env_file" ]; then
         print_error "Existing agent config not found: ${env_file}"
         exit 1
     fi
+    print_info "1/7 Проверяю Docker..."
     if ! command -v docker &> /dev/null; then
         print_error "Docker not found"
         exit 1
@@ -163,14 +205,20 @@ upgrade_existing_runtime() {
         print_error "Docker Compose v2 not found"
         exit 1
     fi
+    print_success "Docker и Docker Compose доступны"
 
     DOCKER_BIN=$(command -v docker)
     mkdir -p "${INSTALL_DIR}/data"
-    cp "$env_file" "${env_file}.bak.$(date +%Y%m%d%H%M%S)"
+    print_info "2/7 Делаю backup текущих файлов..."
+    local backup_suffix
+    backup_suffix=$(date +%Y%m%d%H%M%S)
+    cp "$env_file" "${env_file}.bak.${backup_suffix}"
     if [ -f "${INSTALL_DIR}/docker-compose.yml" ]; then
-        cp "${INSTALL_DIR}/docker-compose.yml" "${INSTALL_DIR}/docker-compose.yml.bak.$(date +%Y%m%d%H%M%S)"
+        cp "${INSTALL_DIR}/docker-compose.yml" "${INSTALL_DIR}/docker-compose.yml.bak.${backup_suffix}"
     fi
+    print_success "Backup создан: *.bak.${backup_suffix}"
 
+    print_info "3/7 Обновляю .env для BLOCK/DIRECT/WARP и Remnawave auto-setup..."
     ensure_env_value "$env_file" LOG_DIR "$(detect_log_dir)"
     ensure_env_value "$env_file" LOG_PATTERN "*.log"
     set_env_value "$env_file" SUSPICIOUS_DESTINATION_AGENT_GUARD_ENABLED true
@@ -204,14 +252,25 @@ upgrade_existing_runtime() {
     set_env_value "$env_file" REMNAWAVE_AUTO_SETUP_TIMEOUT 20
     ensure_env_value "$env_file" REMNAWAVE_WARP_OUTBOUND_CONFIG_PATH /tmp/banhammer-warp-outbound.json
     set_env_value "$env_file" DOCKER_BIN "$DOCKER_BIN"
+    print_success ".env обновлен"
 
+    print_info "4/7 Обновляю docker-compose.yml..."
     write_agent_compose
+    print_success "docker-compose.yml обновлен"
+
     cd "$INSTALL_DIR"
+    print_info "5/7 Скачиваю свежий образ агента: ${IMAGE}"
     docker compose pull
+    print_success "Образ агента скачан"
+
+    print_info "6/7 Пересоздаю контейнер агента..."
     docker compose up -d --force-recreate
-    sleep 5
+    print_success "Контейнер пересоздан"
+
+    print_info "7/7 Жду запуск и проверяю состояние..."
+    sleep 8
     docker compose ps
-    docker compose logs --tail=30
+    verify_agent_runtime
 }
 
 check_node_logs() {
@@ -276,9 +335,16 @@ if [ "${1:-}" != "--reinstall" ] && [ "${1:-}" != "--install" ]; then
     if [ -n "$FOUND_INSTALL_DIR" ]; then
         INSTALL_DIR="$FOUND_INSTALL_DIR"
         echo ""
-        print_info "Найден установленный BedolagaBan Agent: ${INSTALL_DIR}"
-        print_info "Запускаю обновление runtime, compose и образа агента"
-        upgrade_existing_runtime
+        print_warning "Найден установленный BedolagaBan Agent: ${INSTALL_DIR}"
+        print_warning "Для новых правил BLOCK/DIRECT/WARP требуется обновить runtime и docker-compose.yml"
+        print_info "Скрипт сохранит текущий .env, сделает backup, скачает новый образ и перезапустит агента"
+        echo ""
+        if ask_yes_no "Обновить агента сейчас?"; then
+            upgrade_existing_runtime
+        else
+            print_warning "Обновление отменено"
+            print_info "Для полной переустановки запусти этот скрипт с флагом --reinstall"
+        fi
         exit 0
     fi
 fi
