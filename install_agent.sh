@@ -85,6 +85,25 @@ ensure_env_value() {
     printf '%s=%s\n' "$key" "$value" >> "$file"
 }
 
+get_env_value() {
+    local file="$1"
+    local key="$2"
+    local default_value="${3:-}"
+    local line
+    line=$(grep -E "^${key}=" "$file" 2>/dev/null | tail -n 1 || true)
+    if [ -n "$line" ]; then
+        line="${line#*=}"
+        line=$(printf '%s' "$line" | tr -d '\r')
+        case "$line" in
+            \"*\") line="${line#\"}"; line="${line%\"}" ;;
+            \'*\') line="${line#\'}"; line="${line%\'}" ;;
+        esac
+        printf '%s\n' "$line"
+    else
+        printf '%s\n' "$default_value"
+    fi
+}
+
 detect_log_dir() {
     for log_path in "/var/log/remnanode" "/opt/remnanode/logs" "/var/log/xray" "/var/log/3x-ui"; do
         if [ -d "$log_path" ]; then
@@ -149,43 +168,120 @@ services:
 COMPOSE
 }
 
+print_agent_diagnostics() {
+    echo ""
+    print_info "Диагностика агента:"
+    docker inspect -f 'status={{.State.Status}} running={{.State.Running}} exit={{.State.ExitCode}} restart={{.RestartCount}} oom={{.State.OOMKilled}}' banhammer-agent 2>/dev/null || true
+    docker compose ps || true
+    echo ""
+    print_info "Последние логи агента:"
+    docker logs --tail=120 banhammer-agent 2>&1 || docker compose logs --tail=120 || true
+}
+
+fail_agent_ready() {
+    local reason="$1"
+    print_error "$reason"
+    print_agent_diagnostics
+    exit 1
+}
+
 verify_agent_runtime() {
+    local success_message="${1:-Готово: агент обновлен и работает}"
     print_info "Проверяю, что агент поднялся..."
-    if docker inspect -f '{{.State.Running}}' banhammer-agent 2>/dev/null | grep -q "true"; then
-        print_success "Контейнер banhammer-agent запущен"
-    else
-        print_error "Контейнер banhammer-agent не запущен"
-        docker compose logs --tail=80 || true
-        exit 1
+    local timeout="${AGENT_READY_TIMEOUT:-90}"
+    local remna_container
+    local xray_command
+    local last_reason="агент еще запускается"
+    local logs=""
+    local agent_version=""
+    local xray_bridge_required=0
+    local ready=0
+    local deadline=$((SECONDS + timeout))
+
+    remna_container=$(get_env_value "${INSTALL_DIR}/.env" REMNAWAVE_CONTAINER_NAME "remnanode")
+    xray_command=$(get_env_value "${INSTALL_DIR}/.env" XRAY_API_COMMAND "docker exec remnanode rw-core")
+    if printf '%s\n' " $xray_command " | grep -Fq " $remna_container "; then
+        xray_bridge_required=1
     fi
 
-    local agent_version
-    agent_version=$(docker exec banhammer-agent sh -lc 'cat /app/VERSION 2>/dev/null || true' 2>/dev/null | tr -d '\r' | head -n 1)
-    if [ -n "$agent_version" ]; then
-        print_success "Версия агента: ${agent_version}"
-    fi
-
-    if docker exec banhammer-agent sh -lc 'test -S /var/run/docker.sock' 2>/dev/null; then
-        print_success "Docker socket доступен агенту"
-    else
-        print_warning "Docker socket не виден внутри агента; Remnawave auto-setup может не сработать"
-    fi
-
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "remnanode"; then
-        if docker exec remnanode rw-core api lsrules --server=127.0.0.1:61001 >/dev/null 2>&1; then
-            print_success "Xray API bridge отвечает"
-        else
-            print_warning "Xray API bridge пока не отвечает; агент попробует подготовить его после получения настроек"
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if ! docker inspect -f '{{.State.Running}}' banhammer-agent 2>/dev/null | grep -q "true"; then
+            last_reason="контейнер banhammer-agent не запущен"
+            sleep 3
+            continue
         fi
-    else
-        print_warning "Контейнер remnanode не найден; проверка Xray API bridge пропущена"
+
+        logs=$(docker logs --tail=250 banhammer-agent 2>&1 || true)
+        if printf '%s\n' "$logs" | grep -Eiq 'INVALID LICENSE|LICENSE_KEY not configured|Configuration error|ConfigValidationError|Traceback|NameError|ModuleNotFoundError|No module named|Cannot connect to the Docker daemon|No space left on device|Agent cannot start|CRITICAL'; then
+            fail_agent_ready "Агент запустился с критической ошибкой"
+        fi
+
+        agent_version=$(docker exec banhammer-agent sh -lc 'cat /app/VERSION 2>/dev/null || true' 2>/dev/null | tr -d '\r' | head -n 1)
+        if [ -z "$agent_version" ]; then
+            last_reason="не удалось прочитать версию агента"
+            sleep 3
+            continue
+        fi
+
+        if ! docker exec banhammer-agent sh -lc 'test -S /var/run/docker.sock' 2>/dev/null; then
+            last_reason="Docker socket не доступен внутри агента"
+            sleep 3
+            continue
+        fi
+
+        if ! printf '%s\n' "$logs" | grep -qi 'Configuration validated'; then
+            last_reason="агент еще не подтвердил валидную конфигурацию"
+            sleep 3
+            continue
+        fi
+
+        if ! printf '%s\n' "$logs" | grep -qi 'License valid'; then
+            last_reason="агент еще не подтвердил лицензию"
+            sleep 3
+            continue
+        fi
+
+        if ! printf '%s\n' "$logs" | grep -qi 'Connected to '; then
+            last_reason="агент еще не подключился к центральному серверу"
+            sleep 3
+            continue
+        fi
+
+        if [ "$xray_bridge_required" -eq 1 ]; then
+            if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$remna_container"; then
+                last_reason="контейнер ${remna_container} не найден, Xray routing не сможет применяться"
+                sleep 3
+                continue
+            fi
+            if ! docker exec "$remna_container" rw-core api lsrules --server=127.0.0.1:61001 >/dev/null 2>&1; then
+                last_reason="Xray API bridge пока не отвечает"
+                sleep 3
+                continue
+            fi
+        fi
+
+        ready=1
+        break
+    done
+
+    if [ "$ready" -ne 1 ]; then
+        fail_agent_ready "Агент не подтвердил готовность за ${timeout} секунд: ${last_reason}"
+    fi
+
+    print_success "Контейнер banhammer-agent запущен"
+    print_success "Версия агента: ${agent_version}"
+    print_success "Docker socket доступен агенту"
+    print_success "Конфигурация и лицензия подтверждены"
+    print_success "Агент подключился к центральному серверу"
+    if [ "$xray_bridge_required" -eq 1 ]; then
+        print_success "Xray API bridge отвечает"
     fi
 
     echo ""
     print_info "Последние логи агента:"
-    docker compose logs --tail=30 || true
+    docker logs --tail=30 banhammer-agent 2>&1 || docker compose logs --tail=30 || true
     echo ""
-    print_success "Готово: агент обновлен и работает"
+    print_success "$success_message"
 }
 
 upgrade_existing_runtime() {
@@ -268,9 +364,9 @@ upgrade_existing_runtime() {
     print_success "Контейнер пересоздан"
 
     print_info "7/7 Жду запуск и проверяю состояние..."
-    sleep 8
+    sleep "${AGENT_START_DELAY:-8}"
     docker compose ps
-    verify_agent_runtime
+    verify_agent_runtime "Готово: агент обновлен и работает"
 }
 
 check_node_logs() {
@@ -680,19 +776,17 @@ echo ""
 print_info "Запуск агента..."
 docker compose up -d
 
-sleep 5
+sleep "${AGENT_START_DELAY:-8}"
 
 echo ""
 print_info "Статус:"
 docker compose ps
 
-echo ""
-print_info "Логи:"
-docker compose logs --tail=15
+verify_agent_runtime "Готово: агент установлен и работает"
 
 echo ""
 echo -e "${CYAN}========================================${NC}"
-echo -e "${GREEN} Агент установлен!${NC}"
+echo -e "${GREEN} Агент установлен и работает!${NC}"
 echo -e "${CYAN}========================================${NC}"
 echo ""
 echo "  Нода:     ${NODE_NAME}"
