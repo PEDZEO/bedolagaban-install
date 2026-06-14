@@ -44,6 +44,141 @@ ask_yes_no() {
     done
 }
 
+set_env_value() {
+    local file="$1"
+    local key="$2"
+    local value="$3"
+    local tmp
+    tmp=$(mktemp)
+    if [ -f "$file" ] && grep -q "^${key}=" "$file"; then
+        awk -v k="$key" -v v="$value" '
+            BEGIN { replaced = 0 }
+            $0 ~ "^" k "=" {
+                print k "=" v
+                replaced = 1
+                next
+            }
+            { print }
+            END {
+                if (!replaced) {
+                    print k "=" v
+                }
+            }
+        ' "$file" > "$tmp"
+    else
+        if [ -f "$file" ]; then
+            cat "$file" > "$tmp"
+        fi
+        printf '%s=%s\n' "$key" "$value" >> "$tmp"
+    fi
+    cat "$tmp" > "$file"
+    rm -f "$tmp"
+}
+
+ensure_env_value() {
+    local file="$1"
+    local key="$2"
+    local value="$3"
+    if [ -f "$file" ] && grep -q "^${key}=" "$file"; then
+        return 0
+    fi
+    printf '%s=%s\n' "$key" "$value" >> "$file"
+}
+
+write_agent_compose() {
+    cat > "${INSTALL_DIR}/docker-compose.yml" << COMPOSE
+services:
+  banhammer-agent:
+    image: ${IMAGE}
+    container_name: banhammer-agent
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - LOG_DIR=/var/log/remnanode
+      - DB_PATH=/app/data/messages.db
+    volumes:
+      - \${LOG_DIR:-/var/log/remnanode}:/var/log/remnanode:rw
+      - ./data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+      - \${DOCKER_BIN:-/usr/bin/docker}:/usr/bin/docker:ro
+    network_mode: host
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 64M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+COMPOSE
+}
+
+upgrade_existing_runtime() {
+    local env_file="${INSTALL_DIR}/.env"
+    if [ ! -f "$env_file" ]; then
+        print_error "Existing agent config not found: ${env_file}"
+        exit 1
+    fi
+    if ! command -v docker &> /dev/null; then
+        print_error "Docker not found"
+        exit 1
+    fi
+    if ! docker compose version &> /dev/null; then
+        print_error "Docker Compose v2 not found"
+        exit 1
+    fi
+
+    DOCKER_BIN=$(command -v docker)
+    mkdir -p "${INSTALL_DIR}/data"
+    cp "$env_file" "${env_file}.bak.$(date +%Y%m%d%H%M%S)"
+    if [ -f "${INSTALL_DIR}/docker-compose.yml" ]; then
+        cp "${INSTALL_DIR}/docker-compose.yml" "${INSTALL_DIR}/docker-compose.yml.bak.$(date +%Y%m%d%H%M%S)"
+    fi
+
+    set_env_value "$env_file" SUSPICIOUS_DESTINATION_AGENT_GUARD_ENABLED true
+    set_env_value "$env_file" SUSPICIOUS_DESTINATION_AGENT_BLOCK_ENABLED false
+    ensure_env_value "$env_file" SUSPICIOUS_DESTINATION_BLOCK_COMMAND ""
+    set_env_value "$env_file" SUSPICIOUS_DESTINATION_BLOCK_TIMEOUT 2
+    set_env_value "$env_file" XRAY_ROUTING_BLOCK_ENABLED true
+    ensure_env_value "$env_file" XRAY_API_COMMAND "docker exec remnanode rw-core"
+    ensure_env_value "$env_file" XRAY_API_SERVER "127.0.0.1:61001"
+    set_env_value "$env_file" XRAY_API_TIMEOUT 5
+    set_env_value "$env_file" XRAY_API_RETRY_INTERVAL 300
+    ensure_env_value "$env_file" XRAY_RULE_DATA_DIR "/var/log/remnanode"
+    set_env_value "$env_file" XRAY_ROUTING_AUTO_SETUP_ENABLED true
+    set_env_value "$env_file" XRAY_ROUTING_RULES_ENABLED true
+    ensure_env_value "$env_file" XRAY_BLOCK_RULE_TAG BANHAMMER_SUSPICIOUS_DESTINATIONS
+    ensure_env_value "$env_file" XRAY_BLOCK_OUTBOUND_TAG BLOCK
+    ensure_env_value "$env_file" XRAY_DIRECT_RULE_TAG BANHAMMER_DIRECT_DESTINATIONS
+    ensure_env_value "$env_file" XRAY_DIRECT_OUTBOUND_TAG DIRECT
+    ensure_env_value "$env_file" XRAY_WARP_RULE_TAG BANHAMMER_WARP_DESTINATIONS
+    ensure_env_value "$env_file" XRAY_WARP_OUTBOUND_TAG WARP
+    set_env_value "$env_file" XRAY_WARP_AUTO_SETUP_ENABLED true
+    ensure_env_value "$env_file" XRAY_WARP_WORK_DIR /app/data/warp
+    ensure_env_value "$env_file" XRAY_WARP_PROFILE_PATH ""
+    ensure_env_value "$env_file" XRAY_WARP_OUTBOUND_CONFIG_PATH ""
+    ensure_env_value "$env_file" XRAY_WARP_ENDPOINT ""
+    set_env_value "$env_file" XRAY_WARP_MTU 1280
+    ensure_env_value "$env_file" REMNAWAVE_DOCKER_COMMAND docker
+    ensure_env_value "$env_file" REMNAWAVE_CONTAINER_NAME remnanode
+    ensure_env_value "$env_file" REMNAWAVE_API_BRIDGE_PORT 61001
+    set_env_value "$env_file" REMNAWAVE_AUTO_RESTART_ENABLED true
+    set_env_value "$env_file" REMNAWAVE_AUTO_SETUP_TIMEOUT 20
+    ensure_env_value "$env_file" REMNAWAVE_WARP_OUTBOUND_CONFIG_PATH /tmp/banhammer-warp-outbound.json
+    set_env_value "$env_file" DOCKER_BIN "$DOCKER_BIN"
+
+    write_agent_compose
+    cd "$INSTALL_DIR"
+    docker compose pull
+    docker compose up -d --force-recreate
+    sleep 5
+    docker compose ps
+    docker compose logs --tail=30
+}
+
 check_node_logs() {
     local log_dir="$1"
     local access_log="${log_dir}/access.log"
@@ -90,6 +225,11 @@ check_node_logs() {
     fi
 }
 
+if [ "${1:-}" = "--upgrade-runtime" ] || [ "${AUTO_UPGRADE_RUNTIME:-}" = "1" ]; then
+    upgrade_existing_runtime
+    exit 0
+fi
+
 # ========================================
 clear
 cat << "EOF"
@@ -122,6 +262,8 @@ if ! command -v docker &> /dev/null; then
     exit 1
 fi
 print_success "Docker установлен"
+
+DOCKER_BIN=$(command -v docker)
 
 if ! docker compose version &> /dev/null; then
     print_error "Docker Compose v2 не найден!"
@@ -281,6 +423,37 @@ COMPRESSION_THRESHOLD=1024
 
 FILTER_ENABLED=true
 FILTER_PORTS=53,123
+SUSPICIOUS_DESTINATION_AGENT_GUARD_ENABLED=true
+SUSPICIOUS_DESTINATION_AGENT_BLOCK_ENABLED=false
+SUSPICIOUS_DESTINATION_BLOCK_COMMAND=
+SUSPICIOUS_DESTINATION_BLOCK_TIMEOUT=2
+XRAY_ROUTING_BLOCK_ENABLED=true
+XRAY_API_COMMAND=docker exec remnanode rw-core
+XRAY_API_SERVER=127.0.0.1:61001
+XRAY_API_TIMEOUT=5
+XRAY_API_RETRY_INTERVAL=300
+XRAY_RULE_DATA_DIR=/var/log/remnanode
+XRAY_ROUTING_AUTO_SETUP_ENABLED=true
+XRAY_ROUTING_RULES_ENABLED=true
+XRAY_BLOCK_RULE_TAG=BANHAMMER_SUSPICIOUS_DESTINATIONS
+XRAY_BLOCK_OUTBOUND_TAG=BLOCK
+XRAY_DIRECT_RULE_TAG=BANHAMMER_DIRECT_DESTINATIONS
+XRAY_DIRECT_OUTBOUND_TAG=DIRECT
+XRAY_WARP_RULE_TAG=BANHAMMER_WARP_DESTINATIONS
+XRAY_WARP_OUTBOUND_TAG=WARP
+XRAY_WARP_AUTO_SETUP_ENABLED=true
+XRAY_WARP_WORK_DIR=/app/data/warp
+XRAY_WARP_PROFILE_PATH=
+XRAY_WARP_OUTBOUND_CONFIG_PATH=
+XRAY_WARP_ENDPOINT=
+XRAY_WARP_MTU=1280
+REMNAWAVE_DOCKER_COMMAND=docker
+REMNAWAVE_CONTAINER_NAME=remnanode
+REMNAWAVE_API_BRIDGE_PORT=61001
+REMNAWAVE_AUTO_RESTART_ENABLED=true
+REMNAWAVE_AUTO_SETUP_TIMEOUT=20
+REMNAWAVE_WARP_OUTBOUND_CONFIG_PATH=/tmp/banhammer-warp-outbound.json
+DOCKER_BIN=${DOCKER_BIN}
 
 BACKPRESSURE_ENABLED=true
 BACKPRESSURE_THRESHOLD=0.8
@@ -301,8 +474,10 @@ services:
       - LOG_DIR=/var/log/remnanode
       - DB_PATH=/app/data/messages.db
     volumes:
-      - \${LOG_DIR:-/var/log/remnanode}:/var/log/remnanode:ro
+      - \${LOG_DIR:-/var/log/remnanode}:/var/log/remnanode:rw
       - ./data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+      - \${DOCKER_BIN:-/usr/bin/docker}:/usr/bin/docker:ro
     network_mode: host
     deploy:
       resources:
