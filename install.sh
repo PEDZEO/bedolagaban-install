@@ -975,6 +975,14 @@ COMPOSE_PROFILES=$COMPOSE_PROFILES
 # === Отслеживание IP ===
 IP_TTL_MINUTES=30
 IP_WINDOW_SECONDS=60
+
+# === BedolagaBan self-update ===
+SYSTEM_UPDATE_ENABLED=true
+SYSTEM_UPDATE_MODE=registry
+SYSTEM_UPDATE_DOCKER_SOCKET=/var/run/docker.sock
+SYSTEM_UPDATE_HOST_BASE=$(dirname "$INSTALL_DIR")
+SYSTEM_UPDATE_COMPOSE_SUBDIR=$(basename "$INSTALL_DIR")
+SYSTEM_UPDATE_SOURCE_SUBDIR=$(basename "$INSTALL_DIR")-src
 EOF
 
 print_success "Файл .env создан: $ENV_FILE"
@@ -1023,8 +1031,15 @@ services:
       - HTTP_PORT=8080
       - TCP_HOST=0.0.0.0
       - TCP_PORT=9999
+      - SYSTEM_UPDATE_ENABLED=\${SYSTEM_UPDATE_ENABLED:-true}
+      - SYSTEM_UPDATE_DOCKER_SOCKET=/var/run/docker.sock
+      - SYSTEM_UPDATE_HOST_BASE=\${SYSTEM_UPDATE_HOST_BASE}
+      - SYSTEM_UPDATE_SOURCE_SUBDIR=\${SYSTEM_UPDATE_SOURCE_SUBDIR:-banhammer-src}
+      - SYSTEM_UPDATE_COMPOSE_SUBDIR=\${SYSTEM_UPDATE_COMPOSE_SUBDIR:-banhammer}
+      - SYSTEM_UPDATE_MODE=\${SYSTEM_UPDATE_MODE:-registry}
     volumes:
       - ./data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
 ${TLS_VOLUME}
     networks:
       - banhammer-network
