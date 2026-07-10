@@ -44,6 +44,22 @@ ask_yes_no() {
     done
 }
 
+ask_port() {
+    local question="$1"
+    local default_port="$2"
+    local value
+
+    while true; do
+        value=$(ask_question "$question (Enter=$default_port):")
+        value=${value:-$default_port}
+        if [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -ge 1 ] && [ "$value" -le 65535 ]; then
+            echo "$value"
+            return 0
+        fi
+        printf "${RED}✗ Порт должен быть числом от 1 до 65535${NC}\n" >&2
+    done
+}
+
 set_env_value() {
     local file="$1"
     local key="$2"
@@ -143,6 +159,7 @@ services:
   banhammer-agent:
     image: ${IMAGE}
     container_name: banhammer-agent
+    hostname: banhammer-agent
     restart: unless-stopped
     env_file: .env
     environment:
@@ -196,7 +213,7 @@ verify_agent_runtime() {
     local agent_version=""
     local xray_bridge_required=0
     local ready=0
-    local deadline=$((SECONDS + timeout))
+    local deadline=$(($(date +%s) + timeout))
 
     remna_container=$(get_env_value "${INSTALL_DIR}/.env" REMNAWAVE_CONTAINER_NAME "remnanode")
     xray_command=$(get_env_value "${INSTALL_DIR}/.env" XRAY_API_COMMAND "docker exec remnanode rw-core")
@@ -204,7 +221,7 @@ verify_agent_runtime() {
         xray_bridge_required=1
     fi
 
-    while [ "$SECONDS" -lt "$deadline" ]; do
+    while [ "$(date +%s)" -lt "$deadline" ]; do
         if ! docker inspect -f '{{.State.Running}}' banhammer-agent 2>/dev/null | grep -q "true"; then
             last_reason="контейнер banhammer-agent не запущен"
             sleep 3
@@ -326,6 +343,7 @@ upgrade_existing_runtime() {
     ensure_env_value "$env_file" XRAY_API_SERVER "127.0.0.1:61001"
     set_env_value "$env_file" XRAY_API_TIMEOUT 5
     set_env_value "$env_file" XRAY_API_RETRY_INTERVAL 300
+    set_env_value "$env_file" XRAY_ROUTING_RECONCILE_INTERVAL 60
     ensure_env_value "$env_file" XRAY_RULE_DATA_DIR "/var/log/remnanode"
     set_env_value "$env_file" XRAY_ROUTING_AUTO_SETUP_ENABLED true
     set_env_value "$env_file" XRAY_ROUTING_RULES_ENABLED true
@@ -517,8 +535,7 @@ done
 
 # BANHAMMER_PORT
 echo ""
-BANHAMMER_PORT=$(ask_question "Порт сервера (Enter=9999):")
-BANHAMMER_PORT=${BANHAMMER_PORT:-9999}
+BANHAMMER_PORT=$(ask_port "TCP порт сервера BedolagaBan" "${BANHAMMER_PORT:-9999}")
 
 # AGENT_TOKEN
 echo ""
@@ -647,6 +664,7 @@ XRAY_API_COMMAND=docker exec remnanode rw-core
 XRAY_API_SERVER=127.0.0.1:61001
 XRAY_API_TIMEOUT=5
 XRAY_API_RETRY_INTERVAL=300
+XRAY_ROUTING_RECONCILE_INTERVAL=60
 XRAY_RULE_DATA_DIR=/var/log/remnanode
 XRAY_ROUTING_AUTO_SETUP_ENABLED=true
 XRAY_ROUTING_RULES_ENABLED=true
@@ -683,6 +701,7 @@ services:
   banhammer-agent:
     image: ${IMAGE}
     container_name: banhammer-agent
+    hostname: banhammer-agent
     restart: unless-stopped
     env_file: .env
     environment:

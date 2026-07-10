@@ -183,6 +183,12 @@ bash <(curl -fsSL https://raw.githubusercontent.com/PEDZEO/bedolagaban-install/m
 Установщик сам создаёт `.env`, но если нужно заранее понять, какие значения
 туда попадают, ниже есть готовые примеры.
 
+Во время установки можно выбрать собственные `HTTP_PORT` и `TCP_PORT` вместо
+стандартных `8080` и `9999`. Для изменения после установки отредактируй эти
+значения в `/opt/banhammer/.env` и выполни `docker compose up -d`. Если меняется
+`TCP_PORT`, тот же порт нужно указать агентам как `BANHAMMER_PORT` и открыть в
+firewall.
+
 <details>
 <summary>Сервер BedolagaBan: почти полный рабочий пример `.env`</summary>
 

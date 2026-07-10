@@ -61,6 +61,22 @@ ask_yes_no() {
     done
 }
 
+ask_port() {
+    local question="$1"
+    local default_port="$2"
+    local value
+
+    while true; do
+        value=$(ask_question "$question (Enter=$default_port):")
+        value=${value:-$default_port}
+        if [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -ge 1 ] && [ "$value" -le 65535 ]; then
+            echo "$value"
+            return 0
+        fi
+        printf "${RED}✗ Порт должен быть числом от 1 до 65535${NC}\n" >&2
+    done
+}
+
 generate_random_token() {
     openssl rand -base64 32 2>/dev/null | tr -d "=+/" | cut -c1-32 || head -c 64 /dev/urandom | od -An -tx1 | tr -d ' \n' | head -c 32
 }
@@ -398,6 +414,30 @@ print_info "Формат: cookie_name:cookie_value"
 print_info "Пример: UinFiwLL:QHxwyZyP"
 PANEL_SECRET_KEY=$(ask_question "PANEL_SECRET_KEY (необязательно, Enter чтобы пропустить):")
 
+# --- Сетевые порты ---
+echo ""
+print_header "Сетевые порты BedolagaBan"
+echo ""
+print_info "HTTP API используется ботом и админскими интеграциями"
+print_info "TCP порт используется агентами VPN нод"
+echo ""
+
+DEFAULT_HTTP_PORT="${HTTP_PORT:-8080}"
+HTTP_PORT=$(ask_port "Порт HTTP API" "$DEFAULT_HTTP_PORT")
+
+DEFAULT_TCP_PORT="${TCP_PORT:-9999}"
+if [ "$DEFAULT_TCP_PORT" = "$HTTP_PORT" ]; then
+    DEFAULT_TCP_PORT=10000
+fi
+TCP_PORT=$(ask_port "TCP порт для агентов" "$DEFAULT_TCP_PORT")
+while [ "$TCP_PORT" = "$HTTP_PORT" ]; do
+    print_warning "HTTP и TCP не могут использовать один порт: $HTTP_PORT"
+    TCP_PORT=$(ask_port "Укажи другой TCP порт для агентов" "$DEFAULT_TCP_PORT")
+done
+
+print_success "HTTP API: $HTTP_PORT/tcp"
+print_success "Агенты: $TCP_PORT/tcp"
+
 # --- Telegram Bot ---
 echo ""
 print_header "Настройка Telegram бота"
@@ -651,7 +691,7 @@ if ask_yes_no "Включить TLS шифрование?"; then
 
         validate_tls_pair "$TLS_CERT_PATH" "$TLS_KEY_PATH"
         prepare_tls_paths_for_container "$TLS_CERT_PATH" "$TLS_KEY_PATH"
-        print_info "Для Nginx порт 9999 нужно проксировать через stream {}, а не через обычный location {}"
+        print_info "Для Nginx порт $TCP_PORT нужно проксировать через stream {}, а не через обычный location {}"
         print_info "Если stream не настроен, агенты не подключатся даже при рабочем HTTPS сайте"
     else
         # ===== Ручной режим (Nginx, Certbot, и др.) =====
@@ -879,6 +919,8 @@ print_info "  TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:0:10}..."
 print_info "  TELEGRAM_ADMIN_IDS: $TELEGRAM_ADMIN_IDS"
 print_info "  TLS_ENABLED: $TLS_ENABLED"
 print_info "  POSTGRES_ENABLED: $POSTGRES_ENABLED"
+print_info "  HTTP_PORT: $HTTP_PORT"
+print_info "  TCP_PORT: $TCP_PORT"
 echo ""
 
 cat > "$ENV_FILE" << EOF
@@ -889,9 +931,9 @@ cat > "$ENV_FILE" << EOF
 
 # === HTTP/TCP сервер ===
 HTTP_HOST=0.0.0.0
-HTTP_PORT=8080
+HTTP_PORT=$HTTP_PORT
 TCP_HOST=0.0.0.0
-TCP_PORT=9999
+TCP_PORT=$TCP_PORT
 
 # === Лицензия ===
 LICENSE_KEY=$LICENSE_KEY
@@ -1023,14 +1065,14 @@ services:
     container_name: banhammer-lite
     restart: unless-stopped
     ports:
-      - "8080:8080"
-      - "9999:9999"
+      - "\${HTTP_PORT:-8080}:\${HTTP_PORT:-8080}"
+      - "\${TCP_PORT:-9999}:\${TCP_PORT:-9999}"
     env_file: .env
     environment:
       - HTTP_HOST=0.0.0.0
-      - HTTP_PORT=8080
+      - HTTP_PORT=\${HTTP_PORT:-8080}
       - TCP_HOST=0.0.0.0
-      - TCP_PORT=9999
+      - TCP_PORT=\${TCP_PORT:-9999}
       - SYSTEM_UPDATE_ENABLED=\${SYSTEM_UPDATE_ENABLED:-true}
       - SYSTEM_UPDATE_DOCKER_SOCKET=/var/run/docker.sock
       - SYSTEM_UPDATE_HOST_BASE=\${SYSTEM_UPDATE_HOST_BASE}
@@ -1045,7 +1087,7 @@ ${TLS_VOLUME}
       - banhammer-network
 ${REMNAWAVE_NET_REF}
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:\${HTTP_PORT:-8080}/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -1057,7 +1099,7 @@ ${REMNAWAVE_NET_REF}
     restart: unless-stopped
     env_file: .env
     environment:
-      - API_URL=http://banhammer:8080
+      - API_URL=http://banhammer:\${HTTP_PORT:-8080}
     depends_on:
       - banhammer
     networks:
@@ -1105,9 +1147,6 @@ fi
 echo ""
 print_header "Шаг 6/8: Проверка портов"
 echo ""
-
-HTTP_PORT=8080
-TCP_PORT=9999
 
 check_port_in_use() {
     local port=$1
@@ -1254,7 +1293,7 @@ docker compose ps
 
 echo ""
 print_info "Проверяю HTTP API (health check)..."
-if curl -s http://localhost:8080/health > /dev/null 2>&1; then
+if curl -s "http://localhost:$HTTP_PORT/health" > /dev/null 2>&1; then
     print_success "HTTP API работает!"
 else
     print_warning "HTTP API не отвечает (может еще запускаться)"
@@ -1286,10 +1325,10 @@ echo -e "${YELLOW}Agent Token (для установки на VPN ноды):${NC
 echo "   $AGENT_TOKEN"
 echo ""
 echo -e "${YELLOW}API Endpoint:${NC}"
-echo "   http://localhost:8080"
+echo "   http://localhost:$HTTP_PORT"
 echo ""
 echo -e "${YELLOW}TCP порт для агентов:${NC}"
-echo "   9999"
+echo "   $TCP_PORT"
 echo ""
 if [ "$POSTGRES_ENABLED" = "true" ]; then
 echo -e "${YELLOW}PostgreSQL:${NC}"
@@ -1334,7 +1373,7 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo ""
 echo -e "${BLUE}ПРОВЕРКА API${NC}"
 echo ""
-echo "  curl -H \"Authorization: Bearer $API_TOKEN\" http://localhost:8080/api/stats"
+echo "  curl -H \"Authorization: Bearer $API_TOKEN\" http://localhost:$HTTP_PORT/api/stats"
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
@@ -1351,8 +1390,8 @@ if [ "$TLS_ENABLED" = "true" ]; then
     echo ""
     echo -e "  ${YELLOW}4.${NC} Установи агенты на VPN ноды"
 else
-    echo -e "  ${YELLOW}3.${NC} Открой порт 9999 для подключения агентов:"
-    echo "     sudo ufw allow 9999/tcp"
+    echo -e "  ${YELLOW}3.${NC} Открой порт $TCP_PORT для подключения агентов:"
+    echo "     sudo ufw allow $TCP_PORT/tcp"
     echo ""
     echo -e "  ${YELLOW}4.${NC} Установи агенты на VPN ноды"
 fi
@@ -1370,8 +1409,9 @@ BedolagaBan Installation Information
 Дата установки: $(date)
 Директория: $INSTALL_DIR
 
-API Endpoint: http://localhost:8080
-TCP Port: 9999
+API Endpoint: http://localhost:$HTTP_PORT
+HTTP Port: $HTTP_PORT
+TCP Port: $TCP_PORT
 TLS Enabled: $TLS_ENABLED
 $([ "$TLS_ENABLED" = "true" ] && echo "TLS Domain: $TLS_DOMAIN")
 
