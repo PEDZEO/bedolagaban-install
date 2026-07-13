@@ -171,6 +171,9 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - \${DOCKER_BIN:-/usr/bin/docker}:/usr/bin/docker:ro
     network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
     deploy:
       resources:
         limits:
@@ -713,6 +716,9 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - \${DOCKER_BIN:-/usr/bin/docker}:/usr/bin/docker:ro
     network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
     deploy:
       resources:
         limits:
