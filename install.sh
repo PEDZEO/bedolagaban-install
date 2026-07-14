@@ -98,16 +98,55 @@ resolve_domain_ips() {
 }
 
 detect_public_ips() {
-    local detected_ips=""
+    local candidates=""
     if command -v hostname &> /dev/null; then
-        detected_ips=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | grep -vE '^(127|10|192\.168|172\.(1[6-9]|2[0-9]|3[0-1]))\.' | sort -u)
+        candidates=$(hostname -I 2>/dev/null | tr ' ' '\n')
     fi
 
-    if [ -z "$detected_ips" ] && command -v ip &> /dev/null; then
-        detected_ips=$(ip -4 addr show scope global 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1 | sort -u)
+    if [ -z "$candidates" ] && command -v ip &> /dev/null; then
+        candidates=$(ip -4 addr show scope global 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1)
     fi
 
-    echo "$detected_ips"
+    while IFS= read -r candidate; do
+        is_public_ipv4 "$candidate" && echo "$candidate"
+    done <<< "$candidates" | sort -u
+}
+
+is_public_ipv4() {
+    local ip="$1"
+    local a b c d
+    [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+    IFS=. read -r a b c d <<< "$ip"
+    a=$((10#$a)); b=$((10#$b)); c=$((10#$c)); d=$((10#$d))
+    [ "$a" -le 255 ] && [ "$b" -le 255 ] && [ "$c" -le 255 ] && [ "$d" -le 255 ] || return 1
+    [ "$a" -eq 0 ] && return 1
+    [ "$a" -eq 10 ] && return 1
+    [ "$a" -eq 127 ] && return 1
+    [ "$a" -eq 169 ] && [ "$b" -eq 254 ] && return 1
+    [ "$a" -eq 172 ] && [ "$b" -ge 16 ] && [ "$b" -le 31 ] && return 1
+    [ "$a" -eq 192 ] && [ "$b" -eq 168 ] && return 1
+    [ "$a" -eq 100 ] && [ "$b" -ge 64 ] && [ "$b" -le 127 ] && return 1
+    [ "$a" -ge 224 ] && return 1
+    return 0
+}
+
+detect_primary_public_ip() {
+    local candidate
+    candidate=$(detect_public_ips | head -n1)
+    if [ -n "$candidate" ]; then
+        echo "$candidate"
+        return
+    fi
+
+    if command -v curl &> /dev/null; then
+        for endpoint in https://api.ipify.org https://checkip.amazonaws.com https://ipv4.icanhazip.com; do
+            candidate=$(curl -4 -fsS --max-time 4 "$endpoint" 2>/dev/null | tr -d '[:space:]')
+            if is_public_ipv4 "$candidate"; then
+                echo "$candidate"
+                return
+            fi
+        done
+    fi
 }
 
 check_domain_points_here() {
@@ -734,8 +773,10 @@ if ask_yes_no "Включить TLS шифрование?"; then
     fi
 
     TLS_ENABLED="true"
+    AGENT_PUBLIC_HOST="$TLS_DOMAIN"
 else
     TLS_ENABLED="false"
+    AGENT_PUBLIC_HOST=$(detect_primary_public_ip)
     print_info "→ TLS отключен"
     print_info "→ Агенты будут подключаться по IP без шифрования"
 fi
@@ -921,6 +962,7 @@ print_info "  TLS_ENABLED: $TLS_ENABLED"
 print_info "  POSTGRES_ENABLED: $POSTGRES_ENABLED"
 print_info "  HTTP_PORT: $HTTP_PORT"
 print_info "  TCP_PORT: $TCP_PORT"
+print_info "  AGENT_PUBLIC_HOST: ${AGENT_PUBLIC_HOST:-[auto at runtime]}"
 echo ""
 
 cat > "$ENV_FILE" << EOF
@@ -934,6 +976,7 @@ HTTP_HOST=0.0.0.0
 HTTP_PORT=$HTTP_PORT
 TCP_HOST=0.0.0.0
 TCP_PORT=$TCP_PORT
+AGENT_PUBLIC_HOST=$AGENT_PUBLIC_HOST
 
 # === Лицензия ===
 LICENSE_KEY=$LICENSE_KEY
