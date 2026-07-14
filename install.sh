@@ -1227,10 +1227,8 @@ if command -v ufw >/dev/null 2>&1; then
         echo ""
 
         if ! sudo ufw status | grep -q "$HTTP_PORT"; then
-            print_warning "Порт $HTTP_PORT не открыт в UFW"
-            if ask_yes_no "Открыть порт $HTTP_PORT/tcp в UFW?"; then
-                sudo ufw allow $HTTP_PORT/tcp >/dev/null 2>&1 && print_success "Порт $HTTP_PORT/tcp открыт" || print_error "Не удалось открыть порт"
-            fi
+            print_info "Автоматически открываю обязательный порт $HTTP_PORT/tcp в UFW"
+            sudo ufw allow "$HTTP_PORT/tcp" >/dev/null 2>&1 && print_success "Порт $HTTP_PORT/tcp открыт" || print_error "Не удалось открыть порт $HTTP_PORT/tcp"
         else
             print_success "Порт $HTTP_PORT уже открыт в UFW"
         fi
@@ -1238,12 +1236,8 @@ if command -v ufw >/dev/null 2>&1; then
         echo ""
 
         if ! sudo ufw status | grep -q "$TCP_PORT"; then
-            print_warning "Порт $TCP_PORT не открыт в UFW"
-            if ask_yes_no "Открыть порт $TCP_PORT/tcp в UFW? (нужен для агентов)"; then
-                sudo ufw allow $TCP_PORT/tcp >/dev/null 2>&1 && print_success "Порт $TCP_PORT/tcp открыт" || print_error "Не удалось открыть порт"
-            else
-                print_warning "Порт $TCP_PORT не открыт - агенты НЕ смогут подключиться!"
-            fi
+            print_info "Автоматически открываю обязательный порт $TCP_PORT/tcp для агентов"
+            sudo ufw allow "$TCP_PORT/tcp" >/dev/null 2>&1 && print_success "Порт $TCP_PORT/tcp открыт" || print_error "Не удалось открыть порт $TCP_PORT/tcp"
         else
             print_success "Порт $TCP_PORT уже открыт в UFW"
         fi
@@ -1255,10 +1249,8 @@ elif command -v iptables >/dev/null 2>&1; then
     echo ""
 
     if ! sudo iptables -L INPUT -n 2>/dev/null | grep -q "dpt:$HTTP_PORT"; then
-        print_warning "Порт $HTTP_PORT не найден в iptables"
-        if ask_yes_no "Открыть порт $HTTP_PORT/tcp?"; then
-            sudo iptables -A INPUT -p tcp --dport $HTTP_PORT -j ACCEPT && print_success "Порт $HTTP_PORT/tcp открыт"
-        fi
+        print_info "Автоматически открываю обязательный порт $HTTP_PORT/tcp в iptables"
+        sudo iptables -A INPUT -p tcp --dport "$HTTP_PORT" -j ACCEPT && print_success "Порт $HTTP_PORT/tcp открыт"
     else
         print_success "Порт $HTTP_PORT открыт в iptables"
     fi
@@ -1266,10 +1258,8 @@ elif command -v iptables >/dev/null 2>&1; then
     echo ""
 
     if ! sudo iptables -L INPUT -n 2>/dev/null | grep -q "dpt:$TCP_PORT"; then
-        print_warning "Порт $TCP_PORT не найден в iptables"
-        if ask_yes_no "Открыть порт $TCP_PORT/tcp? (нужен для агентов)"; then
-            sudo iptables -A INPUT -p tcp --dport $TCP_PORT -j ACCEPT && print_success "Порт $TCP_PORT/tcp открыт"
-        fi
+        print_info "Автоматически открываю обязательный порт $TCP_PORT/tcp для агентов"
+        sudo iptables -A INPUT -p tcp --dport "$TCP_PORT" -j ACCEPT && print_success "Порт $TCP_PORT/tcp открыт"
     else
         print_success "Порт $TCP_PORT открыт в iptables"
     fi

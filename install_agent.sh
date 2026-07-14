@@ -220,6 +220,14 @@ verify_agent_runtime() {
 
     remna_container=$(get_env_value "${INSTALL_DIR}/.env" REMNAWAVE_CONTAINER_NAME "remnanode")
     xray_command=$(get_env_value "${INSTALL_DIR}/.env" XRAY_API_COMMAND "docker exec remnanode rw-core")
+    if ! docker inspect "$remna_container" >/dev/null 2>&1; then
+        local discovered_container
+        discovered_container=$(docker ps --format '{{.Names}}|{{.Image}}' 2>/dev/null | awk -F'|' 'tolower($2) ~ /remnawave\/node/ {print $1; exit}')
+        if [ -n "$discovered_container" ]; then
+            print_warning "Контейнер ${remna_container} не найден, обнаружен ${discovered_container}"
+            remna_container="$discovered_container"
+        fi
+    fi
     if printf '%s\n' " $xray_command " | grep -Fq " $remna_container "; then
         xray_bridge_required=1
     fi
@@ -249,6 +257,17 @@ verify_agent_runtime() {
             continue
         fi
 
+        if ! docker exec banhammer-agent sh -lc 'command -v ipset >/dev/null && command -v iptables >/dev/null' 2>/dev/null; then
+            last_reason="в контейнере агента отсутствуют ipset/iptables"
+            sleep 3
+            continue
+        fi
+        if ! docker exec banhammer-agent sh -lc 'probe="banhammer_ready_$$"; trap '\''ipset destroy "$probe" >/dev/null 2>&1 || true'\'' EXIT; ipset create "$probe" hash:ip' >/dev/null 2>&1; then
+            last_reason="контейнер агента запущен без NET_ADMIN или ядро хоста не поддерживает ipset"
+            sleep 3
+            continue
+        fi
+
         if ! printf '%s\n' "$logs" | grep -qi 'Configuration validated'; then
             last_reason="агент еще не подтвердил валидную конфигурацию"
             sleep 3
@@ -273,8 +292,18 @@ verify_agent_runtime() {
                 sleep 3
                 continue
             fi
-            if ! docker exec "$remna_container" rw-core api lsrules --server=127.0.0.1:61001 >/dev/null 2>&1; then
-                last_reason="Xray API bridge пока не отвечает"
+            local xray_ready=0
+            if docker exec "$remna_container" rw-core api lsrules --timeout=5 --server=127.0.0.1:61001 >/dev/null 2>&1; then
+                xray_ready=1
+            else
+                local native_socket
+                native_socket=$(docker exec "$remna_container" sh -lc 'cat /run/s6/container_environment/XTLS_API_SOCKET_PATH 2>/dev/null || true' | tr -d '\r\n')
+                if [ -n "$native_socket" ] && docker exec "$remna_container" rw-core api lsrules --timeout=5 --server="unix:@$native_socket" >/dev/null 2>&1; then
+                    xray_ready=1
+                fi
+            fi
+            if [ "$xray_ready" -ne 1 ]; then
+                last_reason="Xray API не отвечает через legacy bridge и native socket"
                 sleep 3
                 continue
             fi
@@ -366,6 +395,7 @@ upgrade_existing_runtime() {
     ensure_env_value "$env_file" REMNAWAVE_CONTAINER_NAME remnanode
     ensure_env_value "$env_file" REMNAWAVE_API_BRIDGE_PORT 61001
     set_env_value "$env_file" REMNAWAVE_AUTO_RESTART_ENABLED true
+    set_env_value "$env_file" REMNAWAVE_AUTO_LOG_MOUNT_ENABLED true
     set_env_value "$env_file" REMNAWAVE_AUTO_SETUP_TIMEOUT 20
     ensure_env_value "$env_file" REMNAWAVE_WARP_OUTBOUND_CONFIG_PATH /tmp/banhammer-warp-outbound.json
     set_env_value "$env_file" DOCKER_BIN "$DOCKER_BIN"
@@ -687,6 +717,7 @@ REMNAWAVE_DOCKER_COMMAND=docker
 REMNAWAVE_CONTAINER_NAME=remnanode
 REMNAWAVE_API_BRIDGE_PORT=61001
 REMNAWAVE_AUTO_RESTART_ENABLED=true
+REMNAWAVE_AUTO_LOG_MOUNT_ENABLED=true
 REMNAWAVE_AUTO_SETUP_TIMEOUT=20
 REMNAWAVE_WARP_OUTBOUND_CONFIG_PATH=/tmp/banhammer-warp-outbound.json
 DOCKER_BIN=${DOCKER_BIN}
