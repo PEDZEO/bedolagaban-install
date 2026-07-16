@@ -373,7 +373,7 @@ upgrade_existing_runtime() {
     set_env_value "$env_file" XRAY_ROUTING_BLOCK_ENABLED true
     ensure_env_value "$env_file" XRAY_API_COMMAND "docker exec remnanode rw-core"
     ensure_env_value "$env_file" XRAY_API_SERVER "127.0.0.1:61001"
-    set_env_value "$env_file" XRAY_API_TIMEOUT 5
+    set_env_value "$env_file" XRAY_API_TIMEOUT 15
     set_env_value "$env_file" XRAY_API_RETRY_INTERVAL 300
     set_env_value "$env_file" XRAY_ROUTING_RECONCILE_INTERVAL 60
     ensure_env_value "$env_file" XRAY_RULE_DATA_DIR "/var/log/remnanode"
@@ -695,7 +695,7 @@ SUSPICIOUS_DESTINATION_BLOCK_TIMEOUT=2
 XRAY_ROUTING_BLOCK_ENABLED=true
 XRAY_API_COMMAND=docker exec remnanode rw-core
 XRAY_API_SERVER=127.0.0.1:61001
-XRAY_API_TIMEOUT=5
+XRAY_API_TIMEOUT=15
 XRAY_API_RETRY_INTERVAL=300
 XRAY_ROUTING_RECONCILE_INTERVAL=60
 XRAY_RULE_DATA_DIR=/var/log/remnanode
