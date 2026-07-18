@@ -190,11 +190,27 @@ ask_secret() {
     echo "$answer"
 }
 
+sanitize_terminal_input() {
+    local value="$1"
+    value=${value//$'\e[200~'/}
+    value=${value//$'\e[201~'/}
+    value=${value//$'\r'/}
+    printf '%s' "$value"
+}
+
+normalize_yes_no_input() {
+    local value
+    value=$(sanitize_terminal_input "$1")
+    value=${value//[[:space:]]/}
+    printf '%s' "$value" | tr '[:upper:]' '[:lower:]'
+}
+
 ask_yes_no() {
+    local yn
     while true; do
         printf '\n  %b?%b %s %b[y/n]%b\n  %b>%b ' "$YELLOW" "$NC" "$1" "$MUTED" "$NC" "$BLUE" "$NC" >&2
         read -r yn
-        yn=$(echo "$yn" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+        yn=$(normalize_yes_no_input "$yn")
         case $yn in
             y|yes|да ) return 0;;
             n|no|нет ) return 1;;
