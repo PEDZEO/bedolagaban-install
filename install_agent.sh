@@ -172,6 +172,7 @@ ask_question() {
     local answer
     printf '\n  %b?%b %s\n  %b>%b ' "$YELLOW" "$NC" "$question" "$BLUE" "$NC" >&2
     read -r answer
+    answer=$(sanitize_terminal_input "$answer")
     echo "$answer"
 }
 
@@ -181,6 +182,7 @@ ask_secret() {
     printf '\n  %b?%b %s\n  %b>%b ' "$YELLOW" "$NC" "$question" "$BLUE" "$NC" >&2
     read -r -s answer
     printf '\n' >&2
+    answer=$(sanitize_terminal_input "$answer")
     echo "$answer"
 }
 
@@ -1042,10 +1044,15 @@ BANHAMMER_PORT=$(ask_port "TCP порт сервера BedolagaBan" "${DETECTED_
 
 # AGENT_TOKEN
 echo ""
-AGENT_TOKEN=$(ask_secret "Токен агента:")
+print_info "Нужен AGENT_TOKEN центрального сервера BedolagaBan, не API-токен Remnawave"
+print_info "При установке агента из Telegram-админки этот токен подставляется автоматически"
+print_info "Для ручной установки выполни на центральном сервере (стандартный путь):"
+printf '  %b%s%b\n' "$MUTED" "sudo grep '^AGENT_TOKEN=' /opt/banhammer/.env" "$NC"
+print_warning "Не отправляй этот токен посторонним: он общий для подключения твоих агентов"
+AGENT_TOKEN=$(ask_secret "Токен подключения агента BedolagaBan (AGENT_TOKEN):")
 while [ -z "$AGENT_TOKEN" ]; do
     print_warning "Токен обязателен!"
-    AGENT_TOKEN=$(ask_secret "Токен агента:")
+    AGENT_TOKEN=$(ask_secret "Токен подключения агента BedolagaBan (AGENT_TOKEN):")
 done
 
 # Шаг 4: Настройка логов

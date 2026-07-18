@@ -178,6 +178,7 @@ ask_question() {
     local answer
     printf '\n  %b?%b %s\n  %b>%b ' "$YELLOW" "$NC" "$question" "$BLUE" "$NC" >&2
     read -r answer
+    answer=$(sanitize_terminal_input "$answer")
     echo "$answer"
 }
 
@@ -187,6 +188,7 @@ ask_secret() {
     printf '\n  %b?%b %s\n  %b>%b ' "$YELLOW" "$NC" "$question" "$BLUE" "$NC" >&2
     read -r -s answer
     printf '\n' >&2
+    answer=$(sanitize_terminal_input "$answer")
     echo "$answer"
 }
 
@@ -1026,18 +1028,22 @@ echo ""
 DEFAULT_API_TOKEN=$(generate_random_token)
 API_TOKEN="$DEFAULT_API_TOKEN"
 if [ "$SETUP_PROFILE" = "advanced" ]; then
-    print_info "API-токен создан автоматически. Можно ввести свой, значение будет скрыто"
-    CUSTOM_API_TOKEN=$(ask_secret "Свой API-токен (Enter = использовать сгенерированный):")
+    print_info "Это внутренний API-токен BedolagaBan для связи сервера, бота и интеграций"
+    print_info "Брать его в Telegram-боте или Remnawave не нужно: безопасный токен уже создан"
+    print_info "Нажми Enter. Свой токен нужен только для уже настроенных внешних интеграций"
+    CUSTOM_API_TOKEN=$(ask_secret "Внутренний API-токен BedolagaBan (Enter = оставить созданный):")
     API_TOKEN=${CUSTOM_API_TOKEN:-$DEFAULT_API_TOKEN}
 fi
-print_success "API-токен подготовлен и скрыт"
+print_success "Внутренний API-токен BedolagaBan подготовлен и скрыт"
 
 echo ""
 DEFAULT_AGENT_TOKEN=$(generate_random_token)
 AGENT_TOKEN="$DEFAULT_AGENT_TOKEN"
 if [ "$SETUP_PROFILE" = "advanced" ]; then
-    print_info "Токен агентов создан автоматически. Можно ввести свой, значение будет скрыто"
-    CUSTOM_AGENT_TOKEN=$(ask_secret "Свой токен агентов (Enter = использовать сгенерированный):")
+    print_info "Это отдельный токен для подключения агентов нод к этому серверу BedolagaBan"
+    print_info "Его тоже не нужно нигде получать: установщик уже создал безопасное значение"
+    print_info "После установки он будет сохранён как AGENT_TOKEN в ${INSTALL_DIR}/.env"
+    CUSTOM_AGENT_TOKEN=$(ask_secret "Токен агентов BedolagaBan (Enter = оставить созданный):")
     AGENT_TOKEN=${CUSTOM_AGENT_TOKEN:-$DEFAULT_AGENT_TOKEN}
 fi
 print_success "Токен агентов подготовлен и скрыт"
@@ -1065,6 +1071,8 @@ done
 echo ""
 print_header "Подключение к Remnawave Panel"
 echo ""
+print_info "Здесь нужны данные именно от Remnawave Panel, не от Telegram-бота BedolagaBan"
+print_info "URL — адрес, по которому ты открываешь админ-панель Remnawave в браузере"
 print_info "Примеры URL:"
 echo "  • https://panel.example.com (рекомендуется)"
 echo "  • http://localhost:3000 (если на этом же сервере)"
@@ -1082,11 +1090,13 @@ while true; do
 done
 
 echo ""
-print_info "API токен можно скопировать из настроек панели"
-PANEL_TOKEN=$(ask_secret "API токен от Remnawave Panel:")
+print_info "Где взять токен: Remnawave Panel → Настройки Remnawave → API-токены"
+print_info "Нажми «Создать токен» и скопируй выданное значение"
+print_info "Это не токен @BotFather и не внутренний API-токен BedolagaBan"
+PANEL_TOKEN=$(ask_secret "API-токен Remnawave Panel:")
 while [ -z "$PANEL_TOKEN" ]; do
-    print_warning "Токен обязателен!"
-    PANEL_TOKEN=$(ask_secret "API токен от Remnawave Panel:")
+    print_warning "API-токен Remnawave обязателен!"
+    PANEL_TOKEN=$(ask_secret "API-токен Remnawave Panel:")
 done
 
 PANEL_SECRET_KEY=""
@@ -1114,10 +1124,10 @@ while ! validate_panel_connection "$PANEL_URL" "$PANEL_TOKEN" "$PANEL_SECRET_KEY
         print_error "URL должен начинаться с http:// или https://"
         PANEL_URL=$(ask_question "URL Remnawave Panel:")
     done
-    PANEL_TOKEN=$(ask_secret "API токен от Remnawave Panel:")
+    PANEL_TOKEN=$(ask_secret "API-токен Remnawave Panel:")
     while [ -z "$PANEL_TOKEN" ]; do
-        print_warning "Токен обязателен"
-        PANEL_TOKEN=$(ask_secret "API токен от Remnawave Panel:")
+        print_warning "API-токен Remnawave обязателен"
+        PANEL_TOKEN=$(ask_secret "API-токен Remnawave Panel:")
     done
     if [ "$SETUP_PROFILE" = "advanced" ]; then
         PANEL_SECRET_KEY=$(ask_secret "PANEL_SECRET_KEY (Enter = не использовать):")
