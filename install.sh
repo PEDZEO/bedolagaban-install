@@ -4,12 +4,26 @@ set -e
 
 umask 077
 
-# Цвета для вывода
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+# Визуальная тема установщика
+if [ -t 1 ] && [ "${TERM:-dumb}" != "dumb" ] && [ -z "${NO_COLOR:-}" ]; then
+    RED='\033[38;5;203m'
+    GREEN='\033[38;5;82m'
+    YELLOW='\033[38;5;214m'
+    BLUE='\033[38;5;45m'
+    MUTED='\033[38;5;246m'
+    BOLD='\033[1m'
+    DIM='\033[2m'
+    NC='\033[0m'
+else
+    RED=''
+    GREEN=''
+    YELLOW=''
+    BLUE=''
+    MUTED=''
+    BOLD=''
+    DIM=''
+    NC=''
+fi
 
 REGISTRY="${REGISTRY:-ghcr.io/pedzeo}"
 TAG="${TAG:-latest}"
@@ -18,58 +32,174 @@ INSTALL_ACTION=""
 SETUP_PROFILE=""
 FORCE_REINSTALL=false
 
-# Функции для вывода
+# Функции интерфейса
+ui_width() {
+    local width
+    width=$(tput cols 2>/dev/null || echo 76)
+    [ "$width" -lt 64 ] && width=64
+    [ "$width" -gt 88 ] && width=88
+    printf '%s\n' "$width"
+}
+
+ui_repeat() {
+    local char="$1"
+    local count="$2"
+    local value
+    [ "$count" -gt 0 ] || return 0
+    printf -v value '%*s' "$count" ''
+    printf '%s' "${value// /$char}"
+}
+
+ui_center() {
+    local text="$1"
+    local width="$2"
+    local padding
+    if [ "${#text}" -gt "$width" ]; then
+        text="${text:0:$((width - 1))}…"
+    fi
+    padding=$(( (width - ${#text}) / 2 ))
+    [ "$padding" -lt 0 ] && padding=0
+    printf '%*s%s%*s' "$padding" '' "$text" "$((width - ${#text} - padding))" ''
+}
+
+ui_clear() {
+    if [ -t 1 ] && command -v clear >/dev/null 2>&1; then
+        clear
+    fi
+}
+
+ui_banner() {
+    local product="$1"
+    local subtitle="$2"
+    local meta="${3:-}"
+    local width
+    local inner
+    width=$(ui_width)
+    inner=$((width - 2))
+    echo ""
+    printf '%b┌' "$BLUE"
+    ui_repeat '─' "$inner"
+    printf '┐%b\n' "$NC"
+    printf '%b│%b%b' "$BLUE" "$NC" "$BOLD"
+    ui_center "$product" "$inner"
+    printf '%b%b│%b\n' "$NC" "$BLUE" "$NC"
+    printf '%b│%b%b' "$BLUE" "$NC" "$MUTED"
+    ui_center "$subtitle" "$inner"
+    printf '%b%b│%b\n' "$NC" "$BLUE" "$NC"
+    if [ -n "$meta" ]; then
+        printf '%b│%b%b' "$BLUE" "$NC" "$DIM"
+        ui_center "$meta" "$inner"
+        printf '%b%b│%b\n' "$NC" "$BLUE" "$NC"
+    fi
+    printf '%b└' "$BLUE"
+    ui_repeat '─' "$inner"
+    printf '┘%b\n' "$NC"
+}
+
+ui_section() {
+    local title="$1"
+    local width
+    local tail
+    width=$(ui_width)
+    tail=$((width - ${#title} - 5))
+    [ "$tail" -lt 3 ] && tail=3
+    echo ""
+    printf '%b%b┌─ %s ' "$BLUE" "$BOLD" "$title"
+    ui_repeat '─' "$tail"
+    printf '%b\n' "$NC"
+}
+
+ui_progress() {
+    local current="$1"
+    local total="$2"
+    local title="$3"
+    local bar_width=28
+    local filled
+    local empty
+    filled=$((current * bar_width / total))
+    empty=$((bar_width - filled))
+    echo ""
+    printf '  %b[%b' "$MUTED" "$NC"
+    printf '%b' "$BLUE"
+    ui_repeat '■' "$filled"
+    printf '%b' "$MUTED"
+    ui_repeat '·' "$empty"
+    printf ']%b %b%s/%s%b\n' "$NC" "$BOLD" "$current" "$total" "$NC"
+    printf '  %b%s%b\n\n' "$BOLD" "$title" "$NC"
+}
+
+ui_menu_item() {
+    local number="$1"
+    local title="$2"
+    local description="${3:-}"
+    local marker="${4:-}"
+    printf '  %b[%s]%b %b%s%b' "$BLUE" "$number" "$NC" "$BOLD" "$title" "$NC"
+    [ -n "$marker" ] && printf ' %b%s%b' "$GREEN" "$marker" "$NC"
+    printf '\n'
+    [ -n "$description" ] && printf '      %b%s%b\n' "$MUTED" "$description" "$NC"
+}
+
+ui_kv() {
+    local label="$1"
+    local value="$2"
+    local padding
+    padding=$((24 - ${#label}))
+    [ "$padding" -lt 1 ] && padding=1
+    printf '  %b%s%b' "$MUTED" "$label" "$NC"
+    printf '%*s%s\n' "$padding" '' "$value"
+}
+
+ui_command() {
+    local label="$1"
+    local command="$2"
+    local padding
+    padding=$((20 - ${#label}))
+    [ "$padding" -lt 1 ] && padding=1
+    printf '  %b%s%b' "$GREEN" "$label" "$NC"
+    printf '%*s%b%s%b\n' "$padding" '' "$MUTED" "$command" "$NC"
+}
+
 print_header() {
-    echo -e "\n${BLUE}=====================================${NC}"
-    echo -e "${BLUE}$1${NC}"
-    echo -e "${BLUE}=====================================${NC}\n"
+    local title="$1"
+    if [[ "$title" =~ ^Шаг[[:space:]]+([0-9]+)/([0-9]+):[[:space:]]+(.+)$ ]]; then
+        ui_progress "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
+    else
+        ui_section "$title"
+    fi
 }
 
-print_success() {
-    echo -e "${GREEN}✓ $1${NC}"
-}
-
-print_error() {
-    echo -e "${RED}✗ $1${NC}"
-}
-
-print_warning() {
-    echo -e "${YELLOW}⚠ $1${NC}"
-}
-
-print_info() {
-    echo -e "${BLUE}ℹ $1${NC}"
-}
+print_success() { printf '  %b[ OK ]%b %s\n' "$GREEN" "$NC" "$1"; }
+print_error() { printf '  %b[ERR ]%b %s\n' "$RED" "$NC" "$1"; }
+print_warning() { printf '  %b[WARN]%b %s\n' "$YELLOW" "$NC" "$1"; }
+print_info() { printf '  %b[INFO]%b %s\n' "$BLUE" "$NC" "$1"; }
 
 ask_question() {
     local question="$1"
     local answer
-    printf "${YELLOW}%s${NC}\n" "$question" >&2
-    read -r -p "→ " answer
+    printf '\n  %b?%b %s\n  %b>%b ' "$YELLOW" "$NC" "$question" "$BLUE" "$NC" >&2
+    read -r answer
     echo "$answer"
 }
 
 ask_secret() {
     local question="$1"
     local answer
-    printf "${YELLOW}%s${NC}\n" "$question" >&2
-    read -r -s -p "→ " answer
+    printf '\n  %b?%b %s\n  %b>%b ' "$YELLOW" "$NC" "$question" "$BLUE" "$NC" >&2
+    read -r -s answer
     printf '\n' >&2
     echo "$answer"
 }
 
 ask_yes_no() {
     while true; do
-        printf "${YELLOW}%s (y/n): ${NC}" "$1" >&2
+        printf '\n  %b?%b %s %b[y/n]%b\n  %b>%b ' "$YELLOW" "$NC" "$1" "$MUTED" "$NC" "$BLUE" "$NC" >&2
         read -r yn
         yn=$(echo "$yn" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
         case $yn in
             y|yes|да ) return 0;;
             n|no|нет ) return 1;;
             * )
-                echo "" >&2
-                echo "  → Введи 'y' или 'n'" >&2
-                echo "" >&2
+                printf '  %bВведи y/yes/да или n/no/нет%b\n' "$YELLOW" "$NC" >&2
                 ;;
         esac
     done
@@ -499,15 +629,14 @@ run_system_preflight() {
 }
 
 choose_existing_action() {
+    ui_section "Установленная система"
+    ui_kv "Каталог" "$INSTALL_DIR"
     echo ""
-    print_warning "Найдена установленная система: $INSTALL_DIR"
-    echo ""
-    echo "  1) Обновить сервер и бот (рекомендуется)"
-    echo "  2) Проверить состояние и показать ошибки"
-    echo "  3) Пересоздать контейнеры без обновления образов"
-    echo "  4) Полная перенастройка (с резервной копией)"
-    echo "  5) Выйти"
-    echo ""
+    ui_menu_item "1" "Обновить сервер и бот" "Конфигурация и база данных не изменяются" "РЕКОМЕНДУЕТСЯ"
+    ui_menu_item "2" "Диагностика" "Проверить контейнеры, API и последние ошибки"
+    ui_menu_item "3" "Восстановить контейнеры" "Пересоздать без скачивания новых образов"
+    ui_menu_item "4" "Полная перенастройка" "Текущая конфигурация будет сохранена в backup"
+    ui_menu_item "5" "Выйти"
     while true; do
         local choice
         choice=$(ask_question "Выбери действие (1-5, Enter=1):")
@@ -774,6 +903,13 @@ find_nginx_cert_paths() {
     fi
 }
 
+if [ "${BEDOLAGABAN_INSTALLER_LIB_ONLY:-0}" = "1" ]; then
+    if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+        exit 0
+    fi
+    return 0
+fi
+
 parse_arguments "$@"
 
 EXISTING_INSTALL_DIR=$(find_existing_server_install || true)
@@ -781,6 +917,8 @@ if [ -n "$EXISTING_INSTALL_DIR" ]; then
     INSTALL_DIR="$EXISTING_INSTALL_DIR"
 fi
 
+ui_clear
+ui_banner "BEDOLAGABAN" "SERVER CONTROL PLANE" "Docker tag: ${TAG}  •  ${INSTALL_DIR}"
 run_system_preflight
 
 if [ -n "$EXISTING_INSTALL_DIR" ] && [ "$FORCE_REINSTALL" != "true" ]; then
@@ -809,24 +947,9 @@ if [ -n "$EXISTING_INSTALL_DIR" ] && [ "$FORCE_REINSTALL" = "true" ]; then
 fi
 
 # Начало установки
-clear
-cat << "EOF"
-╔═══════════════════════════════════════════════════════════╗
-║                                                           ║
-║            BedolagaBan Server Installation                ║
-║               Безопасная установка и обновление           ║
-║                                                           ║
-║    Автоматическая установка сервера мониторинга VPN       ║
-║                                                           ║
-╚═══════════════════════════════════════════════════════════╝
-EOF
-
-echo ""
-print_info "Тег Docker-образов: $TAG"
+ui_section "Новая установка"
 print_info "Этот скрипт установит и настроит BedolagaBan сервер"
-print_info "Тебе будут заданы вопросы о настройке системы"
-print_info "В большинстве случаев можно просто нажать Enter"
-echo ""
+print_info "Безопасные значения уже выбраны; Enter подтверждает рекомендуемый вариант"
 
 if ! ask_yes_no "Готов начать установку?"; then
     echo ""
@@ -835,14 +958,9 @@ if ! ask_yes_no "Готов начать установку?"; then
 fi
 
 if [ -z "$SETUP_PROFILE" ]; then
-    echo ""
     print_header "Режим настройки"
-    echo "  1) Быстрая установка (рекомендуется)"
-    echo "     Только обязательные данные, безопасные параметры задаются автоматически"
-    echo ""
-    echo "  2) Расширенная установка"
-    echo "     Свои токены, порты, уведомления, интеграции и параметры автобана"
-    echo ""
+    ui_menu_item "1" "Быстрая установка" "Только обязательные данные; остальные параметры задаются автоматически" "РЕКОМЕНДУЕТСЯ"
+    ui_menu_item "2" "Расширенная установка" "Свои токены, порты, уведомления, интеграции и автобан"
     while true; do
         SETUP_CHOICE=$(ask_question "Выбери режим (1-2, Enter=1):")
         SETUP_CHOICE=${SETUP_CHOICE:-1}
@@ -1141,10 +1259,9 @@ TLS_MODE=""
 if ask_yes_no "Включить TLS шифрование?"; then
     echo ""
     print_info "Выбери источник сертификатов:"
-    echo "  1) Caddy (автоопределение Let's Encrypt сертификатов)"
-    echo "  2) Nginx / Certbot (автопоиск типовых путей)"
-    echo "  3) Указать путь вручную"
-    echo ""
+    ui_menu_item "1" "Caddy" "Автоопределение Let's Encrypt сертификатов" "РЕКОМЕНДУЕТСЯ"
+    ui_menu_item "2" "Nginx / Certbot" "Автопоиск типовых путей"
+    ui_menu_item "3" "Указать путь вручную"
 
     while true; do
         TLS_MODE=$(ask_question "Выбери (1, 2 или 3):")
@@ -1479,17 +1596,17 @@ fi
 
 echo ""
 print_header "Проверка настроек перед запуском"
-echo "  Режим:                 $([ "$SETUP_PROFILE" = "quick" ] && echo "быстрый" || echo "расширенный")"
-echo "  Remnawave Panel:       $PANEL_URL"
-echo "  HTTP API:              $HTTP_PORT/tcp"
-echo "  Подключение агентов:   $TCP_PORT/tcp"
-echo "  Публичный адрес:       ${AGENT_PUBLIC_HOST:-не определен}"
-echo "  TLS:                   $([ "$TLS_ENABLED" = "true" ] && echo "включен (${TLS_DOMAIN})" || echo "выключен")"
-echo "  Администраторов:       ${TELEGRAM_ADMIN_COUNT:-1}"
-echo "  Уведомления:           $([ -n "$TELEGRAM_NOTIFY_CHAT" ] && echo "группа ${TELEGRAM_NOTIFY_CHAT}" || echo "личные сообщения администраторам")"
-echo "  Автобаны:              $([ "$PUNISHMENT_ENABLED" = "true" ] && echo "включены" || echo "выключены")"
-echo "  PostgreSQL:            $([ "$POSTGRES_ENABLED" = "true" ] && echo "включен" || echo "выключен")"
-echo "  Секреты:               скрыты, будут сохранены в .env с правами 600"
+ui_kv "Режим" "$([ "$SETUP_PROFILE" = "quick" ] && echo "Быстрый" || echo "Расширенный")"
+ui_kv "Remnawave Panel" "$PANEL_URL"
+ui_kv "HTTP API" "$HTTP_PORT/tcp"
+ui_kv "Подключение агентов" "$TCP_PORT/tcp"
+ui_kv "Публичный адрес" "${AGENT_PUBLIC_HOST:-не определен}"
+ui_kv "TLS" "$([ "$TLS_ENABLED" = "true" ] && echo "Включен (${TLS_DOMAIN})" || echo "Выключен")"
+ui_kv "Администраторов" "${TELEGRAM_ADMIN_COUNT:-1}"
+ui_kv "Уведомления" "$([ -n "$TELEGRAM_NOTIFY_CHAT" ] && echo "Группа ${TELEGRAM_NOTIFY_CHAT}" || echo "Личные сообщения администраторам")"
+ui_kv "Автобаны" "$([ "$PUNISHMENT_ENABLED" = "true" ] && echo "Включены" || echo "Выключены")"
+ui_kv "PostgreSQL" "$([ "$POSTGRES_ENABLED" = "true" ] && echo "Включен" || echo "Выключен")"
+ui_kv "Секреты" "Скрыты; .env будет сохранен с правами 600"
 echo ""
 if ! ask_yes_no "Применить эти настройки?"; then
     print_warning "Установка отменена, рабочая конфигурация не изменена"
@@ -2007,100 +2124,43 @@ fi
 # ========================================
 # Итоги
 # ========================================
-echo ""
-echo ""
-print_header "Установка завершена!"
-echo ""
+ui_banner "УСТАНОВКА ЗАВЕРШЕНА" "Все обязательные проверки пройдены" "BedolagaBan Server"
+print_success "Сервер, Telegram-бот и хранилище готовы к работе"
 
-echo -e "${GREEN}✓ BedolagaBan сервер успешно установлен и запущен!${NC}"
-echo ""
-echo "   Версия сервера: $(container_version banhammer-lite)"
-echo "   Версия бота:    $(container_version banhammer-bot)"
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-echo -e "${BLUE}ВАЖНАЯ ИНФОРМАЦИЯ${NC}"
-echo ""
-echo -e "${YELLOW}Секреты API и агентов:${NC}"
-echo "   Сохранены в $INSTALL_DIR/.env и не выводятся в терминал"
-echo ""
-echo -e "${YELLOW}API Endpoint:${NC}"
-echo "   http://localhost:$HTTP_PORT"
-echo ""
-echo -e "${YELLOW}TCP порт для агентов:${NC}"
-echo "   $TCP_PORT"
-echo ""
-if [ "$POSTGRES_ENABLED" = "true" ]; then
-echo -e "${YELLOW}PostgreSQL:${NC}"
-echo "   Включён (аналитика доступна)"
-echo "   Пароль скрыт и хранится в .env"
-else
-echo -e "${YELLOW}PostgreSQL:${NC}"
-echo "   Отключён (аналитика недоступна)"
-fi
-echo ""
-echo -e "${YELLOW}Конфигурация:${NC}"
-echo "   $INSTALL_DIR/.env"
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-echo -e "${BLUE}ПОЛЕЗНЫЕ КОМАНДЫ${NC}"
-echo ""
-echo -e "  ${GREEN}Логи сервера:${NC}"
-echo "    docker compose logs -f banhammer"
-echo ""
-echo -e "  ${GREEN}Логи бота:${NC}"
-echo "    docker compose logs -f telegram-bot"
-echo ""
-if [ "$POSTGRES_ENABLED" = "true" ]; then
-echo -e "  ${GREEN}Логи PostgreSQL:${NC}"
-echo "    docker compose logs -f postgres"
-echo ""
-fi
-echo -e "  ${GREEN}Статус:${NC}"
-echo "    docker compose ps"
-echo ""
-echo -e "  ${GREEN}Остановить:${NC}"
-echo "    docker compose down"
-echo ""
-echo -e "  ${GREEN}Перезапустить:${NC}"
-echo "    docker compose restart"
-echo ""
-echo -e "  ${GREEN}Обновление:${NC}"
-echo "    docker compose pull && docker compose up -d"
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-echo -e "${BLUE}ПРОВЕРКА API${NC}"
-echo ""
-echo "  API доступен на http://localhost:$HTTP_PORT (токен хранится в .env)"
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-echo -e "${BLUE}СЛЕДУЮЩИЕ ШАГИ${NC}"
-echo ""
-echo -e "  ${YELLOW}1.${NC} Проверь Telegram бота - отправь ему /start"
-echo ""
-echo -e "  ${YELLOW}2.${NC} Убедись что Remnawave Panel доступен:"
-echo "     $PANEL_URL"
-echo ""
+ui_section "Компоненты"
+ui_kv "Сервер" "v$(container_version banhammer-lite)"
+ui_kv "Telegram-бот" "v$(container_version banhammer-bot)"
+ui_kv "PostgreSQL" "$([ "$POSTGRES_ENABLED" = "true" ] && echo "Включен" || echo "Выключен")"
+ui_kv "TLS" "$([ "$TLS_ENABLED" = "true" ] && echo "Включен • ${TLS_DOMAIN}" || echo "Выключен")"
 
+ui_section "Доступ"
+ui_kv "HTTP API" "http://localhost:$HTTP_PORT"
+ui_kv "Порт агентов" "$TCP_PORT/tcp"
+ui_kv "Конфигурация" "$INSTALL_DIR/.env"
+ui_kv "Секреты" "Скрыты и доступны только root"
+
+ui_section "Управление"
+ui_command "Статус" "docker compose ps"
+ui_command "Логи сервера" "docker compose logs -f banhammer"
+ui_command "Логи бота" "docker compose logs -f telegram-bot"
+if [ "$POSTGRES_ENABLED" = "true" ]; then
+    ui_command "Логи PostgreSQL" "docker compose logs -f postgres"
+fi
+ui_command "Перезапуск" "docker compose restart"
+ui_command "Остановка" "docker compose down"
+ui_command "Обновление" "docker compose pull && docker compose up -d"
+
+ui_section "Следующие действия"
+printf '  %b1.%b Отправь команду /start Telegram-боту\n' "$YELLOW" "$NC"
+printf '  %b2.%b Проверь доступность Remnawave Panel: %s\n' "$YELLOW" "$NC" "$PANEL_URL"
 if [ "$TLS_ENABLED" = "true" ]; then
-    echo -e "  ${YELLOW}3.${NC} Настрой Caddy для домена: $TLS_DOMAIN"
-    echo ""
-    echo -e "  ${YELLOW}4.${NC} Установи агенты на VPN ноды"
+    printf '  %b3.%b Проверь TLS-домен агентов: %s\n' "$YELLOW" "$NC" "$TLS_DOMAIN"
 else
-    echo -e "  ${YELLOW}3.${NC} Открой порт $TCP_PORT для подключения агентов:"
-    echo "     sudo ufw allow $TCP_PORT/tcp"
-    echo ""
-    echo -e "  ${YELLOW}4.${NC} Установи агенты на VPN ноды"
+    printf '  %b3.%b Убедись, что порт %s/tcp доступен агентам\n' "$YELLOW" "$NC" "$TCP_PORT"
 fi
-
+printf '  %b4.%b Установи агенты на VPN-ноды\n' "$YELLOW" "$NC"
 echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-echo -e "${GREEN}✓ Готово! Система готова к работе.${NC}"
-echo ""
+print_success "BedolagaBan полностью готов к работе"
 
 # Сохраняем информацию об установке (без секретов)
 cat > "${INSTALL_DIR}/INSTALLATION_INFO.txt" << EOF
