@@ -494,14 +494,34 @@ while true; do
 done
 echo ""
 print_info "Свой ID можно узнать у @userinfobot"
-TELEGRAM_ADMIN_IDS=$(ask_question "Твой Telegram ID:")
+print_info "Можно указать несколько ID через запятую, пробел или точку с запятой"
+normalize_telegram_admin_ids() {
+    local normalized
+    normalized=$(printf '%s' "$1" | sed -E 's/[[:space:];]+/,/g; s/,+/,/g; s/^,//; s/,$//')
+    if [[ ! "$normalized" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]]; then
+        return 1
+    fi
+    printf '%s\n' "$normalized" | awk -F',' '
+        {
+            result = ""
+            for (i = 1; i <= NF; i++) {
+                if (!seen[$i]++) {
+                    result = result (result ? "," : "") $i
+                }
+            }
+            print result
+        }
+    '
+}
 while true; do
-    if [[ "$TELEGRAM_ADMIN_IDS" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
-        print_success "ID корректный"
+    TELEGRAM_ADMIN_IDS_RAW=$(ask_question "Telegram ID администраторов:")
+    if TELEGRAM_ADMIN_IDS=$(normalize_telegram_admin_ids "$TELEGRAM_ADMIN_IDS_RAW"); then
+        TELEGRAM_ADMIN_COUNT=$(awk -F',' '{print NF}' <<< "$TELEGRAM_ADMIN_IDS")
+        print_success "Администраторов настроено: $TELEGRAM_ADMIN_COUNT"
+        print_info "ID: $TELEGRAM_ADMIN_IDS"
         break
     else
-        print_error "Введи числовой Telegram ID (или несколько через запятую)"
-        TELEGRAM_ADMIN_IDS=$(ask_question "Твой Telegram ID:")
+        print_error "Введи один или несколько числовых ID, например: 123456789, 987654321"
     fi
 done
 
