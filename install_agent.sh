@@ -6,6 +6,8 @@
 
 set -e
 
+umask 077
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -17,6 +19,9 @@ REGISTRY="ghcr.io/pedzeo"
 TAG="${TAG:-latest}"
 IMAGE="${REGISTRY}/bedolagaban-agent:${TAG}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/banhammer-agent}"
+SETUP_PROFILE=""
+INSTALL_ACTION=""
+FORCE_REINSTALL=false
 
 print_success() { echo -e "${GREEN}✓ $1${NC}"; }
 print_error() { echo -e "${RED}✗ $1${NC}"; }
@@ -28,6 +33,15 @@ ask_question() {
     local answer
     printf "${YELLOW}%s${NC}\n" "$question" >&2
     read -r -p "→ " answer
+    echo "$answer"
+}
+
+ask_secret() {
+    local question="$1"
+    local answer
+    printf "${YELLOW}%s${NC}\n" "$question" >&2
+    read -r -s -p "→ " answer
+    printf '\n' >&2
     echo "$answer"
 }
 
@@ -56,7 +70,134 @@ ask_port() {
             echo "$value"
             return 0
         fi
-        printf "${RED}✗ Порт должен быть числом от 1 до 65535${NC}\n" >&2
+        printf '%b✗ Порт должен быть числом от 1 до 65535%b\n' "$RED" "$NC" >&2
+    done
+}
+
+show_usage() {
+    cat << EOF
+Использование: $0 [режим]
+
+Без аргументов    Интерактивная установка или меню обновления
+--quick           Быстрая установка с автоопределением TLS и нагрузки
+--advanced        Расширенная установка
+--update          Обновить существующий агент
+--diagnose        Показать состояние и последние ошибки
+--reinstall       Полностью перенастроить агент
+--help            Показать эту справку
+EOF
+}
+
+install_base_packages() {
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -qq
+        DEBIAN_FRONTEND=noninteractive apt-get install -y curl openssl ca-certificates
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y curl openssl ca-certificates
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y curl openssl ca-certificates
+    else
+        return 1
+    fi
+}
+
+run_agent_preflight() {
+    local architecture
+    local available_kb
+    if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+        print_error "Установщик агента нужно запускать от root"
+        exit 1
+    fi
+    architecture=$(uname -m)
+    case "$architecture" in
+        x86_64|amd64) print_success "Архитектура поддерживается: $architecture" ;;
+        *) print_error "Архитектура $architecture не поддерживается готовым образом агента"; exit 1 ;;
+    esac
+    available_kb=$(df -Pk / 2>/dev/null | awk 'NR==2 {print $4}')
+    if [ "${available_kb:-0}" -lt 1048576 ]; then
+        if [ -n "${FOUND_INSTALL_DIR:-}" ]; then
+            print_warning "Свободного места меньше 1 ГБ; диагностика доступна, перед обновлением будет выполнена очистка"
+        else
+            print_error "Для новой установки агента требуется минимум 1 ГБ свободного места"
+            exit 1
+        fi
+    else
+        print_success "Свободного места достаточно: $((available_kb / 1024)) МБ"
+    fi
+
+    if ! command -v curl >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1; then
+        if ask_yes_no "Установить недостающие curl/OpenSSL автоматически?"; then
+            install_base_packages || { print_error "Не удалось установить системные утилиты"; exit 1; }
+        else
+            print_error "curl и OpenSSL обязательны"
+            exit 1
+        fi
+    fi
+    command -v timeout >/dev/null 2>&1 || { print_error "Не найдена системная утилита timeout (coreutils)"; exit 1; }
+    if ! command -v docker >/dev/null 2>&1; then
+        print_warning "Docker не установлен"
+        if ask_yes_no "Установить Docker официальным скриптом?"; then
+            local docker_script
+            docker_script=$(mktemp)
+            curl -fsSL https://get.docker.com -o "$docker_script" || { rm -f "$docker_script"; exit 1; }
+            sh "$docker_script"
+            rm -f "$docker_script"
+            systemctl enable --now docker 2>/dev/null || true
+        else
+            exit 1
+        fi
+    fi
+    docker info >/dev/null 2>&1 || { print_error "Docker daemon не отвечает"; exit 1; }
+    docker compose version >/dev/null 2>&1 || { print_error "Не найден Docker Compose v2"; exit 1; }
+    print_success "Docker и Docker Compose готовы"
+}
+
+probe_server_transport() {
+    local host="$1"
+    local port="$2"
+    if timeout 8 openssl s_client -connect "${host}:${port}" -servername "$host" -brief </dev/null >/dev/null 2>&1; then
+        return 0
+    fi
+    if timeout 5 bash -c "</dev/tcp/${host}/${port}" >/dev/null 2>&1; then
+        return 1
+    fi
+    return 2
+}
+
+discover_remnawave_containers() {
+    docker ps --format '{{.Names}}|{{.Image}}' 2>/dev/null | awk -F'|' '
+        tolower($2) ~ /remnawave\/node/ || tolower($1) ~ /^remnanode/ {print $1}
+    '
+}
+
+choose_remnawave_container() {
+    local -a containers
+    local choice
+    mapfile -t containers < <(discover_remnawave_containers)
+    if [ "${#containers[@]}" -eq 0 ]; then
+        print_error "На сервере не найден запущенный контейнер RemnaNode"
+        print_info "Сначала установи и запусти ноду Remnawave, затем повтори установку агента"
+        return 1
+    fi
+    if [ "${#containers[@]}" -eq 1 ]; then
+        REMNAWAVE_CONTAINER_NAME="${containers[0]}"
+        print_success "Найдена RemnaNode: $REMNAWAVE_CONTAINER_NAME"
+        return 0
+    fi
+
+    echo ""
+    print_warning "На сервере найдено несколько RemnaNode"
+    for i in "${!containers[@]}"; do
+        echo "  $((i + 1))) ${containers[$i]}"
+    done
+    while true; do
+        choice=$(ask_question "К какой ноде подключить агент (1-${#containers[@]}):")
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#containers[@]}" ]; then
+            REMNAWAVE_CONTAINER_NAME="${containers[$((choice - 1))]}"
+            print_success "Выбрана RemnaNode: $REMNAWAVE_CONTAINER_NAME"
+            return 0
+        fi
+        print_warning "Укажи номер ноды из списка"
     done
 }
 
@@ -121,12 +262,21 @@ get_env_value() {
 }
 
 detect_log_dir() {
+    local mounted_source
+    local remna_container="${REMNAWAVE_CONTAINER_NAME:-remnanode}"
+    mounted_source=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/log/remnanode"}}{{.Source}}{{end}}{{end}}' "$remna_container" 2>/dev/null || true)
+    if [ -n "$mounted_source" ]; then
+        mkdir -p "$mounted_source"
+        echo "$mounted_source"
+        return 0
+    fi
     for log_path in "/var/log/remnanode" "/opt/remnanode/logs" "/var/log/xray" "/var/log/3x-ui"; do
         if [ -d "$log_path" ]; then
             echo "$log_path"
             return 0
         fi
     done
+    mkdir -p /var/log/remnanode
     echo "/var/log/remnanode"
 }
 
@@ -145,7 +295,8 @@ find_existing_install_dir() {
             *"|${candidate}|"*) continue ;;
         esac
         checked="${checked}${candidate}|"
-        if [ -f "${candidate}/.env" ]; then
+        if [ -f "${candidate}/.env" ] && [ -f "${candidate}/docker-compose.yml" ] && \
+            grep -qE 'bedolagaban-agent|container_name:[[:space:]]*banhammer-agent' "${candidate}/docker-compose.yml" 2>/dev/null; then
             echo "$candidate"
             return 0
         fi
@@ -153,8 +304,46 @@ find_existing_install_dir() {
     return 1
 }
 
+restore_reinstall_backup() {
+    [ -n "${REINSTALL_BACKUP_SUFFIX:-}" ] || return 1
+    [ -f "${INSTALL_DIR}/.env.bak.${REINSTALL_BACKUP_SUFFIX}" ] || return 1
+    cp "${INSTALL_DIR}/.env.bak.${REINSTALL_BACKUP_SUFFIX}" "${INSTALL_DIR}/.env"
+    if [ -f "${INSTALL_DIR}/docker-compose.yml.bak.${REINSTALL_BACKUP_SUFFIX}" ]; then
+        cp "${INSTALL_DIR}/docker-compose.yml.bak.${REINSTALL_BACKUP_SUFFIX}" "${INSTALL_DIR}/docker-compose.yml"
+    fi
+    chmod 600 "${INSTALL_DIR}/.env" "${INSTALL_DIR}/docker-compose.yml" 2>/dev/null || true
+    if [ -n "${PREVIOUS_AGENT_IMAGE:-}" ]; then
+        docker image tag "$PREVIOUS_AGENT_IMAGE" "$IMAGE" >/dev/null || true
+    fi
+    (cd "$INSTALL_DIR" && docker compose up -d --force-recreate) || true
+    print_warning "Предыдущая конфигурация агента восстановлена"
+}
+
+restore_agent_update_backup() {
+    local env_file="$1"
+    local compose_file="$2"
+    local backup_suffix="$3"
+    local old_image_id="$4"
+    cp "${env_file}.bak.${backup_suffix}" "$env_file"
+    if [ -f "${compose_file}.bak.${backup_suffix}" ]; then
+        cp "${compose_file}.bak.${backup_suffix}" "$compose_file"
+    fi
+    chmod 600 "$env_file" "$compose_file" 2>/dev/null || true
+    if [ -n "$old_image_id" ]; then
+        docker image tag "$old_image_id" "$IMAGE" >/dev/null || true
+    fi
+    if ! (cd "$INSTALL_DIR" && docker compose up -d --force-recreate); then
+        print_error "Предыдущие файлы восстановлены, но контейнер не запустился"
+        return 1
+    fi
+    print_warning "Предыдущая конфигурация и образ агента восстановлены"
+}
+
 write_agent_compose() {
-    cat > "${INSTALL_DIR}/docker-compose.yml" << COMPOSE
+    local compose_file="${1:-${INSTALL_DIR}/docker-compose.yml}"
+    local env_file="${2:-${INSTALL_DIR}/.env}"
+    local compose_tmp="${compose_file}.new.$$"
+    cat > "$compose_tmp" << COMPOSE
 services:
   banhammer-agent:
     image: ${IMAGE}
@@ -186,6 +375,14 @@ services:
         max-size: "10m"
         max-file: "3"
 COMPOSE
+    chmod 600 "$compose_tmp"
+    if ! docker compose --env-file "$env_file" -f "$compose_tmp" config --quiet; then
+        rm -f "$compose_tmp"
+        print_error "Сгенерированная Docker Compose конфигурация агента некорректна"
+        return 1
+    fi
+    mv -f "$compose_tmp" "$compose_file"
+    chmod 600 "$compose_file"
 }
 
 print_agent_diagnostics() {
@@ -335,6 +532,9 @@ verify_agent_runtime() {
 
 upgrade_existing_runtime() {
     local env_file="${INSTALL_DIR}/.env"
+    local compose_file="${INSTALL_DIR}/docker-compose.yml"
+    local old_image_id
+    local current_xray_command
     echo ""
     print_info "Обновление BedolagaBan Agent: ${INSTALL_DIR}"
     if [ ! -f "$env_file" ]; then
@@ -353,13 +553,18 @@ upgrade_existing_runtime() {
     print_success "Docker и Docker Compose доступны"
 
     DOCKER_BIN=$(command -v docker)
+    old_image_id=$(docker inspect -f '{{.Image}}' banhammer-agent 2>/dev/null || true)
+    REMNAWAVE_CONTAINER_NAME=$(get_env_value "$env_file" REMNAWAVE_CONTAINER_NAME "remnanode")
+    if ! docker inspect "$REMNAWAVE_CONTAINER_NAME" >/dev/null 2>&1; then
+        choose_remnawave_container || exit 1
+    fi
     mkdir -p "${INSTALL_DIR}/data"
     print_info "2/7 Делаю backup текущих файлов..."
     local backup_suffix
     backup_suffix=$(date +%Y%m%d%H%M%S)
     cp "$env_file" "${env_file}.bak.${backup_suffix}"
-    if [ -f "${INSTALL_DIR}/docker-compose.yml" ]; then
-        cp "${INSTALL_DIR}/docker-compose.yml" "${INSTALL_DIR}/docker-compose.yml.bak.${backup_suffix}"
+    if [ -f "$compose_file" ]; then
+        cp "$compose_file" "${compose_file}.bak.${backup_suffix}"
     fi
     print_success "Backup создан: *.bak.${backup_suffix}"
 
@@ -371,7 +576,10 @@ upgrade_existing_runtime() {
     ensure_env_value "$env_file" SUSPICIOUS_DESTINATION_BLOCK_COMMAND ""
     set_env_value "$env_file" SUSPICIOUS_DESTINATION_BLOCK_TIMEOUT 2
     set_env_value "$env_file" XRAY_ROUTING_BLOCK_ENABLED true
-    ensure_env_value "$env_file" XRAY_API_COMMAND "docker exec remnanode rw-core"
+    current_xray_command=$(get_env_value "$env_file" XRAY_API_COMMAND "")
+    if [ -z "$current_xray_command" ] || [[ "$current_xray_command" == docker\ exec*rw-core* ]]; then
+        set_env_value "$env_file" XRAY_API_COMMAND "docker exec ${REMNAWAVE_CONTAINER_NAME} rw-core"
+    fi
     ensure_env_value "$env_file" XRAY_API_SERVER "127.0.0.1:61001"
     set_env_value "$env_file" XRAY_API_TIMEOUT 15
     set_env_value "$env_file" XRAY_API_RETRY_INTERVAL 300
@@ -392,32 +600,60 @@ upgrade_existing_runtime() {
     ensure_env_value "$env_file" XRAY_WARP_ENDPOINT ""
     set_env_value "$env_file" XRAY_WARP_MTU 1280
     ensure_env_value "$env_file" REMNAWAVE_DOCKER_COMMAND docker
-    ensure_env_value "$env_file" REMNAWAVE_CONTAINER_NAME remnanode
+    set_env_value "$env_file" REMNAWAVE_CONTAINER_NAME "$REMNAWAVE_CONTAINER_NAME"
     ensure_env_value "$env_file" REMNAWAVE_API_BRIDGE_PORT 61001
     set_env_value "$env_file" REMNAWAVE_AUTO_RESTART_ENABLED true
     set_env_value "$env_file" REMNAWAVE_AUTO_LOG_MOUNT_ENABLED true
     set_env_value "$env_file" REMNAWAVE_AUTO_SETUP_TIMEOUT 20
     ensure_env_value "$env_file" REMNAWAVE_WARP_OUTBOUND_CONFIG_PATH /tmp/banhammer-warp-outbound.json
     set_env_value "$env_file" DOCKER_BIN "$DOCKER_BIN"
+    chmod 600 "$env_file"
     print_success ".env обновлен"
 
     print_info "4/7 Обновляю docker-compose.yml..."
-    write_agent_compose
+    if ! write_agent_compose; then
+        restore_agent_update_backup "$env_file" "$compose_file" "$backup_suffix" "$old_image_id" || true
+        exit 1
+    fi
     print_success "docker-compose.yml обновлен"
 
     cd "$INSTALL_DIR"
+    print_info "Освобождаю место от старых неиспользуемых образов..."
+    docker image prune -a -f --filter "until=168h" >/dev/null 2>&1 || true
     print_info "5/7 Скачиваю свежий образ агента: ${IMAGE}"
-    docker compose pull
+    if ! docker compose pull; then
+        cp "${env_file}.bak.${backup_suffix}" "$env_file"
+        [ -f "${compose_file}.bak.${backup_suffix}" ] && cp "${compose_file}.bak.${backup_suffix}" "$compose_file"
+        chmod 600 "$env_file" "$compose_file" 2>/dev/null || true
+        print_error "Не удалось скачать образ; предыдущая конфигурация восстановлена"
+        exit 1
+    fi
     print_success "Образ агента скачан"
 
     print_info "6/7 Пересоздаю контейнер агента..."
-    docker compose up -d --force-recreate
+    if ! docker compose up -d --force-recreate; then
+        print_error "Не удалось пересоздать контейнер агента"
+        restore_agent_update_backup "$env_file" "$compose_file" "$backup_suffix" "$old_image_id" || true
+        exit 1
+    fi
     print_success "Контейнер пересоздан"
 
     print_info "7/7 Жду запуск и проверяю состояние..."
     sleep "${AGENT_START_DELAY:-8}"
     docker compose ps
-    verify_agent_runtime "Готово: агент обновлен и работает"
+    if (verify_agent_runtime "Готово: агент обновлен и работает"); then
+        return 0
+    fi
+
+    print_warning "Новая версия не прошла проверку. Выполняю откат..."
+    restore_agent_update_backup "$env_file" "$compose_file" "$backup_suffix" "$old_image_id" || true
+    sleep "${AGENT_START_DELAY:-8}"
+    if (verify_agent_runtime "Предыдущая версия агента восстановлена и работает"); then
+        print_warning "Обновление отменено, рабочая версия восстановлена"
+    else
+        print_error "Откат выполнен, но агент не подтвердил готовность"
+    fi
+    exit 1
 }
 
 check_node_logs() {
@@ -466,34 +702,101 @@ check_node_logs() {
     fi
 }
 
-if [ "${1:-}" = "--upgrade-runtime" ] || [ "${1:-}" = "--update" ] || [ "${1:-}" = "update" ] || [ "${AUTO_UPGRADE_RUNTIME:-}" = "1" ]; then
-    if [ ! -f "${INSTALL_DIR}/.env" ]; then
-        FOUND_INSTALL_DIR=$(find_existing_install_dir || true)
-        if [ -n "$FOUND_INSTALL_DIR" ]; then
-            INSTALL_DIR="$FOUND_INSTALL_DIR"
-        fi
+parse_agent_arguments() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --quick) SETUP_PROFILE="quick" ;;
+            --advanced) SETUP_PROFILE="advanced" ;;
+            --upgrade-runtime|--update|update) INSTALL_ACTION="update" ;;
+            --diagnose) INSTALL_ACTION="diagnose" ;;
+            --reinstall|--install) FORCE_REINSTALL=true ;;
+            --help|-h) show_usage; exit 0 ;;
+            *) print_error "Неизвестный аргумент: $1"; show_usage; exit 2 ;;
+        esac
+        shift
+    done
+}
+
+diagnose_existing_agent() {
+    local logs
+    cd "$INSTALL_DIR"
+    print_agent_diagnostics
+    if ! docker inspect -f '{{.State.Running}}' banhammer-agent 2>/dev/null | grep -q true; then
+        print_error "Контейнер агента не запущен"
+        return 1
     fi
-    upgrade_existing_runtime
-    exit 0
+    logs=$(docker logs --tail=300 banhammer-agent 2>&1 || true)
+    if ! grep -qi 'Configuration validated' <<< "$logs"; then
+        print_error "Агент не подтвердил конфигурацию"
+        return 1
+    fi
+    if ! grep -qi 'License valid' <<< "$logs"; then
+        print_error "Агент не подтвердил лицензию"
+        return 1
+    fi
+    if ! grep -qi 'Connected to ' <<< "$logs"; then
+        print_error "Агент не подключен к центральному серверу"
+        return 1
+    fi
+    print_success "Агент работает, лицензия и подключение подтверждены"
+}
+
+choose_existing_agent_action() {
+    echo ""
+    print_warning "Найден установленный BedolagaBan Agent: ${INSTALL_DIR}"
+    echo "  1) Обновить агент (рекомендуется)"
+    echo "  2) Проверить состояние и показать ошибки"
+    echo "  3) Полностью перенастроить"
+    echo "  4) Выйти"
+    while true; do
+        local choice
+        choice=$(ask_question "Выбери действие (1-4, Enter=1):")
+        choice=${choice:-1}
+        case "$choice" in
+            1) INSTALL_ACTION="update"; return ;;
+            2) INSTALL_ACTION="diagnose"; return ;;
+            3)
+                if ask_yes_no "Перенастроить агент с резервной копией текущих файлов?"; then
+                    FORCE_REINSTALL=true
+                    return
+                fi
+                ;;
+            4) exit 0 ;;
+            *) print_warning "Выбери число от 1 до 4" ;;
+        esac
+    done
+}
+
+parse_agent_arguments "$@"
+if [ "${AUTO_UPGRADE_RUNTIME:-}" = "1" ]; then
+    INSTALL_ACTION="update"
 fi
 
-if [ "${1:-}" != "--reinstall" ] && [ "${1:-}" != "--install" ]; then
-    FOUND_INSTALL_DIR=$(find_existing_install_dir || true)
-    if [ -n "$FOUND_INSTALL_DIR" ]; then
-        INSTALL_DIR="$FOUND_INSTALL_DIR"
-        echo ""
-        print_warning "Найден установленный BedolagaBan Agent: ${INSTALL_DIR}"
-        print_warning "Для новых правил BLOCK/DIRECT/WARP требуется обновить runtime и docker-compose.yml"
-        print_info "Скрипт сохранит текущий .env, сделает backup, скачает новый образ и перезапустит агента"
-        echo ""
-        if ask_yes_no "Обновить агента сейчас?"; then
-            upgrade_existing_runtime
-        else
-            print_warning "Обновление отменено"
-            print_info "Для полной переустановки запусти этот скрипт с флагом --reinstall"
-        fi
-        exit 0
-    fi
+FOUND_INSTALL_DIR=$(find_existing_install_dir || true)
+if [ -n "$FOUND_INSTALL_DIR" ]; then
+    INSTALL_DIR="$FOUND_INSTALL_DIR"
+fi
+
+run_agent_preflight
+
+if [ -n "$FOUND_INSTALL_DIR" ] && [ "$FORCE_REINSTALL" != "true" ]; then
+    [ -n "$INSTALL_ACTION" ] || choose_existing_agent_action
+    case "$INSTALL_ACTION" in
+        update) upgrade_existing_runtime; exit $? ;;
+        diagnose) diagnose_existing_agent; exit $? ;;
+    esac
+fi
+
+if [ -z "$FOUND_INSTALL_DIR" ] && [ -n "$INSTALL_ACTION" ]; then
+    print_error "Установленный агент не найден"
+    exit 1
+fi
+
+if [ -n "$FOUND_INSTALL_DIR" ] && [ "$FORCE_REINSTALL" = "true" ]; then
+    REINSTALL_BACKUP_SUFFIX=$(date +%Y%m%d%H%M%S)
+    cp "${INSTALL_DIR}/.env" "${INSTALL_DIR}/.env.bak.${REINSTALL_BACKUP_SUFFIX}"
+    [ -f "${INSTALL_DIR}/docker-compose.yml" ] && cp "${INSTALL_DIR}/docker-compose.yml" "${INSTALL_DIR}/docker-compose.yml.bak.${REINSTALL_BACKUP_SUFFIX}"
+    print_success "Резервная копия создана: *.bak.${REINSTALL_BACKUP_SUFFIX}"
 fi
 
 # ========================================
@@ -518,29 +821,35 @@ if ! ask_yes_no "Готов начать установку?"; then
     exit 0
 fi
 
+if [ -z "$SETUP_PROFILE" ]; then
+    echo ""
+    echo "  1) Быстрая установка (рекомендуется)"
+    echo "     TLS и параметры нагрузки определяются автоматически"
+    echo "  2) Расширенная установка"
+    echo "     Можно вручную выбрать TLS и профиль нагрузки"
+    while true; do
+        PROFILE_CHOICE=$(ask_question "Выбери режим (1-2, Enter=1):")
+        PROFILE_CHOICE=${PROFILE_CHOICE:-1}
+        case "$PROFILE_CHOICE" in
+            1) SETUP_PROFILE="quick"; break ;;
+            2) SETUP_PROFILE="advanced"; break ;;
+            *) print_warning "Выбери 1 или 2" ;;
+        esac
+    done
+fi
+print_success "Режим: $([ "$SETUP_PROFILE" = "quick" ] && echo "быстрый" || echo "расширенный")"
+
 # Шаг 1: Проверка Docker
 echo ""
 print_info "Шаг 1/5: Проверка Docker..."
-
-if ! command -v docker &> /dev/null; then
-    print_error "Docker не найден!"
-    print_info "Установи Docker: https://docs.docker.com/engine/install/"
-    exit 1
-fi
-print_success "Docker установлен"
-
 DOCKER_BIN=$(command -v docker)
-
-if ! docker compose version &> /dev/null; then
-    print_error "Docker Compose v2 не найден!"
-    exit 1
-fi
-print_success "Docker Compose найден"
+print_success "Docker: $(docker --version)"
+print_success "Docker Compose: $(docker compose version --short 2>/dev/null || docker compose version)"
 
 # Шаг 2: Настройка директории
 echo ""
 print_info "Шаг 2/5: Создание директорий..."
-mkdir -p ${INSTALL_DIR}/data
+mkdir -p "${INSTALL_DIR}/data"
 print_success "Директория: ${INSTALL_DIR}"
 
 # Шаг 3: Сбор конфигурации
@@ -551,7 +860,9 @@ echo ""
 
 # NODE_NAME
 print_info "Уникальное имя этой ноды (например: node1, germany-1, vps-amsterdam)"
-NODE_NAME=$(ask_question "Имя ноды:")
+DEFAULT_NODE_NAME=$(hostname -s 2>/dev/null || echo node)
+NODE_NAME=$(ask_question "Имя ноды (Enter=${DEFAULT_NODE_NAME}):")
+NODE_NAME=${NODE_NAME:-$DEFAULT_NODE_NAME}
 while [ -z "$NODE_NAME" ]; do
     print_warning "Имя ноды обязательно!"
     NODE_NAME=$(ask_question "Имя ноды:")
@@ -560,51 +871,46 @@ done
 # BANHAMMER_HOST
 echo ""
 print_info "IP адрес или домен сервера BedolagaBan"
-BANHAMMER_HOST=$(ask_question "Адрес сервера:")
-while [ -z "$BANHAMMER_HOST" ]; do
-    print_warning "Адрес сервера обязателен!"
-    BANHAMMER_HOST=$(ask_question "Адрес сервера:")
+while true; do
+    SERVER_ADDRESS=$(ask_question "Адрес сервера (например agent.example.com или 1.2.3.4:9999):")
+    SERVER_ADDRESS=${SERVER_ADDRESS#http://}
+    SERVER_ADDRESS=${SERVER_ADDRESS#https://}
+    SERVER_ADDRESS=${SERVER_ADDRESS%/}
+    if [[ "$SERVER_ADDRESS" =~ ^([A-Za-z0-9.-]+):([0-9]{1,5})$ ]]; then
+        BANHAMMER_HOST="${BASH_REMATCH[1]}"
+        DETECTED_SERVER_PORT="${BASH_REMATCH[2]}"
+    else
+        BANHAMMER_HOST="$SERVER_ADDRESS"
+        DETECTED_SERVER_PORT=""
+    fi
+    if [[ "$BANHAMMER_HOST" =~ ^[A-Za-z0-9.-]+$ ]]; then
+        break
+    fi
+    print_warning "Укажи только корректный IP или домен без пути"
 done
 
 # BANHAMMER_PORT
 echo ""
-BANHAMMER_PORT=$(ask_port "TCP порт сервера BedolagaBan" "${BANHAMMER_PORT:-9999}")
+BANHAMMER_PORT=$(ask_port "TCP порт сервера BedolagaBan" "${DETECTED_SERVER_PORT:-${BANHAMMER_PORT:-9999}}")
 
 # AGENT_TOKEN
 echo ""
-AGENT_TOKEN=$(ask_question "Токен агента:")
+AGENT_TOKEN=$(ask_secret "Токен агента:")
 while [ -z "$AGENT_TOKEN" ]; do
     print_warning "Токен обязателен!"
-    AGENT_TOKEN=$(ask_question "Токен агента:")
+    AGENT_TOKEN=$(ask_secret "Токен агента:")
 done
 
 # Шаг 4: Настройка логов
 echo ""
 print_info "Шаг 4/5: Настройка логов"
 
-# Автоопределение
-FOUND_LOG_DIR=""
-for log_path in "/var/log/remnanode" "/opt/remnanode/logs" "/var/log/xray" "/var/log/3x-ui"; do
-    if [ -d "$log_path" ]; then
-        LOG_COUNT=$(find "$log_path" -name "*.log" 2>/dev/null | wc -l)
-        if [ "$LOG_COUNT" -gt 0 ]; then
-            print_success "Найдены логи: $log_path ($LOG_COUNT файлов)"
-            FOUND_LOG_DIR="$log_path"
-            break
-        fi
-    fi
-done
+choose_remnawave_container || exit 1
 
-if [ -n "$FOUND_LOG_DIR" ]; then
-    LOG_DIR=$(ask_question "Директория логов (Enter='$FOUND_LOG_DIR'):")
-    LOG_DIR=${LOG_DIR:-$FOUND_LOG_DIR}
-else
-    LOG_DIR=$(ask_question "Директория логов:")
-    while [ -z "$LOG_DIR" ]; do
-        print_warning "Директория обязательна!"
-        LOG_DIR=$(ask_question "Директория логов:")
-    done
-fi
+# Автоопределение источника mount ноды и создание каталога без ручного ввода.
+LOG_DIR=$(detect_log_dir)
+mkdir -p "$LOG_DIR"
+print_success "Каталог логов подготовлен: $LOG_DIR"
 
 check_node_logs "$LOG_DIR"
 
@@ -613,51 +919,92 @@ echo ""
 print_info "Лицензионный ключ получен при покупке"
 print_info "Пробный ключ можно получить на сайте: https://shop.pedze.ru/"
 print_info "Формат: BB-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-LICENSE_KEY=$(ask_question "Лицензионный ключ:")
+LICENSE_KEY=$(ask_secret "Лицензионный ключ:")
 while true; do
     if [[ "$LICENSE_KEY" =~ ^BB-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$ ]]; then
         print_success "Формат ключа корректный"
         break
     else
         print_error "Неверный формат! Ожидается: BB-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-        LICENSE_KEY=$(ask_question "Лицензионный ключ:")
+        LICENSE_KEY=$(ask_secret "Лицензионный ключ:")
     fi
 done
 
 # TLS
 echo ""
-if ask_yes_no "Использовать TLS шифрование?"; then
+print_info "Определяю тип подключения к ${BANHAMMER_HOST}:${BANHAMMER_PORT}..."
+if probe_server_transport "$BANHAMMER_HOST" "$BANHAMMER_PORT"; then
     TLS_ENABLED="true"
+    print_success "Обнаружено TLS-подключение"
 else
-    TLS_ENABLED="false"
+    TRANSPORT_RESULT=$?
+    if [ "$TRANSPORT_RESULT" -eq 1 ]; then
+        TLS_ENABLED="false"
+        print_success "Обнаружено обычное TCP-подключение без TLS"
+    elif [ "$SETUP_PROFILE" = "advanced" ]; then
+        print_warning "Центральный сервер сейчас недоступен; автоопределение невозможно"
+        if ask_yes_no "Сервер настроен с TLS?"; then
+            TLS_ENABLED="true"
+        else
+            TLS_ENABLED="false"
+        fi
+    else
+        print_error "Не удалось подключиться к ${BANHAMMER_HOST}:${BANHAMMER_PORT}"
+        print_info "Проверь адрес, порт и firewall центрального сервера"
+        exit 1
+    fi
 fi
 
 # Профиль нагрузки
 echo ""
-print_info "Профиль нагрузки:"
-echo "  1) До 1000 юзеров"
-echo "  2) 1000-10000"
-echo "  3) 10000-50000"
-echo "  4) 50000+"
-echo ""
+if [ "$SETUP_PROFILE" = "quick" ]; then
+    PROFILE=2
+    BATCH_SIZE=100; BATCH_TIMEOUT=0.5; MAX_QUEUE_SIZE=50000; DEDUP_WINDOW=45
+    print_success "Автоматический профиль нагрузки: до 10000 пользователей"
+else
+    print_info "Профиль нагрузки:"
+    echo "  1) До 1000 пользователей"
+    echo "  2) 1000-10000"
+    echo "  3) 10000-50000"
+    echo "  4) 50000+"
+    while true; do
+        PROFILE=$(ask_question "Выбери (1-4, Enter=2):")
+        PROFILE=${PROFILE:-2}
+        case $PROFILE in
+            1) BATCH_SIZE=50;  BATCH_TIMEOUT=1.0; MAX_QUEUE_SIZE=10000;  DEDUP_WINDOW=30; break;;
+            2) BATCH_SIZE=100; BATCH_TIMEOUT=0.5; MAX_QUEUE_SIZE=50000;  DEDUP_WINDOW=45; break;;
+            3) BATCH_SIZE=200; BATCH_TIMEOUT=0.5; MAX_QUEUE_SIZE=100000; DEDUP_WINDOW=60; break;;
+            4) BATCH_SIZE=500; BATCH_TIMEOUT=0.3; MAX_QUEUE_SIZE=200000; DEDUP_WINDOW=90; break;;
+            *) print_warning "Выбери 1, 2, 3 или 4";;
+        esac
+    done
+fi
 
-while true; do
-    PROFILE=$(ask_question "Выбери (1-4):")
-    case $PROFILE in
-        1) BATCH_SIZE=50;  BATCH_TIMEOUT=1.0; MAX_QUEUE_SIZE=10000;  DEDUP_WINDOW=30; break;;
-        2) BATCH_SIZE=100; BATCH_TIMEOUT=0.5; MAX_QUEUE_SIZE=50000;  DEDUP_WINDOW=45; break;;
-        3) BATCH_SIZE=200; BATCH_TIMEOUT=0.5; MAX_QUEUE_SIZE=100000; DEDUP_WINDOW=60; break;;
-        4) BATCH_SIZE=500; BATCH_TIMEOUT=0.3; MAX_QUEUE_SIZE=200000; DEDUP_WINDOW=90; break;;
-        *) print_warning "Выбери 1, 2, 3 или 4";;
-    esac
-done
+echo ""
+echo "  Нода:             $NODE_NAME"
+echo "  RemnaNode:        $REMNAWAVE_CONTAINER_NAME"
+echo "  Центральный сервер: ${BANHAMMER_HOST}:${BANHAMMER_PORT}"
+echo "  TLS:              $TLS_ENABLED"
+echo "  Каталог логов:    $LOG_DIR"
+echo "  Профиль нагрузки: $PROFILE"
+echo "  Токен и лицензия: скрыты"
+echo ""
+if ! ask_yes_no "Установить агент с этими настройками?"; then
+    print_warning "Установка отменена"
+    exit 0
+fi
 
 # Шаг 5: Создание конфигурации и запуск
 echo ""
 print_info "Шаг 5/5: Запуск агента"
 
 # .env
-cat > ${INSTALL_DIR}/.env << EOF
+STAGE_DIR="${INSTALL_DIR}/.installer-stage.$$"
+rm -rf "$STAGE_DIR"
+mkdir -p "$STAGE_DIR"
+STAGE_ENV="${STAGE_DIR}/.env"
+STAGE_COMPOSE="${STAGE_DIR}/docker-compose.yml"
+cat > "$STAGE_ENV" << EOF
 # BedolagaBan Agent Configuration
 # Создано: $(date)
 
@@ -693,7 +1040,7 @@ SUSPICIOUS_DESTINATION_AGENT_BLOCK_ENABLED=false
 SUSPICIOUS_DESTINATION_BLOCK_COMMAND=
 SUSPICIOUS_DESTINATION_BLOCK_TIMEOUT=2
 XRAY_ROUTING_BLOCK_ENABLED=true
-XRAY_API_COMMAND=docker exec remnanode rw-core
+XRAY_API_COMMAND=docker exec ${REMNAWAVE_CONTAINER_NAME} rw-core
 XRAY_API_SERVER=127.0.0.1:61001
 XRAY_API_TIMEOUT=15
 XRAY_API_RETRY_INTERVAL=300
@@ -714,7 +1061,7 @@ XRAY_WARP_OUTBOUND_CONFIG_PATH=
 XRAY_WARP_ENDPOINT=
 XRAY_WARP_MTU=1280
 REMNAWAVE_DOCKER_COMMAND=docker
-REMNAWAVE_CONTAINER_NAME=remnanode
+REMNAWAVE_CONTAINER_NAME=${REMNAWAVE_CONTAINER_NAME}
 REMNAWAVE_API_BRIDGE_PORT=61001
 REMNAWAVE_AUTO_RESTART_ENABLED=true
 REMNAWAVE_AUTO_LOG_MOUNT_ENABLED=true
@@ -727,110 +1074,52 @@ BACKPRESSURE_THRESHOLD=0.8
 BACKPRESSURE_MAX_DELAY=5.0
 EOF
 
-print_success ".env создан"
-
-# docker-compose.yml
-cat > ${INSTALL_DIR}/docker-compose.yml << COMPOSE
-services:
-  banhammer-agent:
-    image: ${IMAGE}
-    container_name: banhammer-agent
-    hostname: banhammer-agent
-    restart: unless-stopped
-    env_file: .env
-    environment:
-      - LOG_DIR=/var/log/remnanode
-      - DB_PATH=/app/data/messages.db
-    volumes:
-      - \${LOG_DIR:-/var/log/remnanode}:/var/log/remnanode:rw
-      - ./data:/app/data
-      - /var/run/docker.sock:/var/run/docker.sock
-      - \${DOCKER_BIN:-/usr/bin/docker}:/usr/bin/docker:ro
-    network_mode: host
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-        reservations:
-          memory: 64M
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-COMPOSE
-
-print_success "docker-compose.yml создан"
+chmod 600 "$STAGE_ENV"
+write_agent_compose "$STAGE_COMPOSE" "$STAGE_ENV"
+mv -f "$STAGE_ENV" "${INSTALL_DIR}/.env"
+mv -f "$STAGE_COMPOSE" "${INSTALL_DIR}/docker-compose.yml"
+rmdir "$STAGE_DIR"
+chmod 600 "${INSTALL_DIR}/.env" "${INSTALL_DIR}/docker-compose.yml"
+print_success "Конфигурация агента проверена и применена атомарно"
 
 # Запуск
-cd ${INSTALL_DIR}
+cd "${INSTALL_DIR}"
+PREVIOUS_AGENT_IMAGE=$(docker inspect -f '{{.Image}}' banhammer-agent 2>/dev/null || true)
 
-# Скачивание образа
+# Проверяем авторизацию в GHCR
 echo ""
-print_info "Скачивание образа ${IMAGE}..."
-
-# Пробуем скачать без авторизации (для публичных образов)
-if docker compose pull 2>&1 | tee /tmp/pull_output.log; then
-    print_success "Образ скачан успешно"
-else
-    # Проверяем, действительно ли нужна авторизация
-    if grep -q "unauthorized\|denied\|authentication required" /tmp/pull_output.log 2>/dev/null; then
-        echo ""
-        print_warning "Образ требует авторизацию в GitHub Container Registry"
-        print_info "Это может быть потому что:"
-        print_info "  1. Образ находится в приватном репозитории"
-        print_info "  2. GitHub временно ограничил анонимный доступ"
-        echo ""
-        print_info "Для авторизации нужен GitHub Personal Access Token:"
-        print_info "  1. Перейди: https://github.com/settings/tokens/new"
-        print_info "  2. Название: bedolagaban-agent"
-        print_info "  3. Права: read:packages"
-        print_info "  4. Скопируй токен"
-        echo ""
-
-        if ask_yes_no "Хочешь авторизоваться сейчас?"; then
-            read -sp "$(printf "${YELLOW}GitHub Personal Access Token: ${NC}")" GHCR_TOKEN
-            echo ""
-            if echo "$GHCR_TOKEN" | docker login ghcr.io -u pedzeo --password-stdin 2>/dev/null; then
-                print_success "Авторизация успешна"
-                print_info "Повторная попытка скачивания..."
-                if docker compose pull; then
-                    print_success "Образ скачан успешно"
-                else
-                    print_error "Не удалось скачать образ даже после авторизации"
-                    print_info "Свяжись с администратором или проверь настройки репозитория"
-                    exit 1
-                fi
-            else
-                print_error "Не удалось авторизоваться"
-                print_info "Проверь токен и попробуй снова"
-                exit 1
-            fi
-        else
-            print_warning "Установка прервана. Авторизация обязательна для этого образа."
-            exit 1
-        fi
+print_info "Проверяю доступ к реестру образов..."
+if ! docker pull "$IMAGE" --quiet 2>/dev/null; then
+    print_warning "Нет доступа к ${REGISTRY}. Нужна авторизация."
+    print_info "Создай токен: https://github.com/settings/tokens/new"
+    print_info "Нужные права: read:packages"
+    echo ""
+    printf '%bGitHub Personal Access Token: %b' "$YELLOW" "$NC"
+    read -r -s GHCR_TOKEN
+    echo ""
+    if echo "$GHCR_TOKEN" | docker login ghcr.io -u pedzeo --password-stdin 2>/dev/null; then
+        print_success "Авторизация успешна"
     else
-        # Другая ошибка (сеть, неверный тег и т.п.)
-        print_error "Не удалось скачать образ"
-        print_info "Возможные причины:"
-        print_info "  - Проблемы с сетью"
-        print_info "  - Образ не существует: ${IMAGE}"
-        print_info "  - GitHub Container Registry недоступен"
-        echo ""
-        print_info "Логи ошибки:"
-        cat /tmp/pull_output.log 2>/dev/null || echo "(нет логов)"
+        print_error "Не удалось авторизоваться в GHCR"
         exit 1
     fi
 fi
-rm -f /tmp/pull_output.log 2>/dev/null
+
+print_info "Скачивание образа..."
+docker image prune -a -f --filter "until=168h" >/dev/null 2>&1 || true
+if ! docker compose pull; then
+    print_error "Не удалось скачать образ агента; контейнер не изменен"
+    restore_reinstall_backup || true
+    exit 1
+fi
 
 echo ""
 print_info "Запуск агента..."
-docker compose up -d
+if ! docker compose up -d; then
+    print_error "Не удалось запустить контейнер агента"
+    restore_reinstall_backup || true
+    exit 1
+fi
 
 sleep "${AGENT_START_DELAY:-8}"
 
@@ -838,7 +1127,15 @@ echo ""
 print_info "Статус:"
 docker compose ps
 
-verify_agent_runtime "Готово: агент установлен и работает"
+if ! (verify_agent_runtime "Готово: агент установлен и работает"); then
+    if [ -n "${REINSTALL_BACKUP_SUFFIX:-}" ]; then
+        print_warning "Новая конфигурация не прошла проверку, восстанавливаю предыдущую"
+        restore_reinstall_backup || true
+        sleep "${AGENT_START_DELAY:-8}"
+        (verify_agent_runtime "Предыдущая конфигурация восстановлена") || true
+    fi
+    exit 1
+fi
 
 echo ""
 echo -e "${CYAN}========================================${NC}"
