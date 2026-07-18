@@ -249,8 +249,13 @@ NOTIFIER_TIMEZONE=Europe/Moscow
 NOTIFIER_TZ_OFFSET_MINUTES=
 
 # Уведомления пользователям через BedolagaBot
-MAIN_BOT_API_URL=http://bedolaga-bot:8080
-MAIN_BOT_API_KEY=твой_api_ключ_от_бота
+# Сначала включи в .env основного бота:
+# WEB_API_ENABLED=true
+# WEB_API_HOST=0.0.0.0
+# WEB_API_PORT=8080
+# WEB_API_DEFAULT_TOKEN=<результат openssl rand -hex 32>
+MAIN_BOT_API_URL=http://IP_СЕРВЕРА_ОСНОВНОГО_БОТА:8080
+MAIN_BOT_API_KEY=значение_WEB_API_DEFAULT_TOKEN_основного_бота
 
 # Наказания
 PUNISHMENT_ENABLED=true

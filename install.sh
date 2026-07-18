@@ -281,6 +281,41 @@ validate_panel_connection() {
     return 1
 }
 
+validate_main_bot_connection() {
+    local base_url="${1%/}"
+    local api_key="$2"
+    local response_file
+    local status
+
+    response_file=$(mktemp)
+    status=$(curl -sS --max-time 10 -o "$response_file" -w "%{http_code}" \
+        -H "X-API-Key: $api_key" "${base_url}/tokens" 2>/dev/null || true)
+    rm -f "$response_file"
+
+    case "$status" in
+        200)
+            print_success "API основного BedolagaBot доступен, ключ принят"
+            return 0
+            ;;
+        401|403)
+            print_error "BedolagaBot отклонил API-ключ (HTTP $status)"
+            print_info "Проверь значение WEB_API_DEFAULT_TOKEN в .env основного бота"
+            ;;
+        404)
+            print_error "По адресу ${base_url} не найден Web API BedolagaBot (/tokens)"
+            print_info "Проверь URL и что WEB_API_ENABLED=true"
+            ;;
+        000|"")
+            print_error "Не удалось подключиться к Web API BedolagaBot: ${base_url}"
+            print_info "Проверь IP/домен, WEB_API_PORT и доступность порта с этого сервера"
+            ;;
+        *)
+            print_error "Web API BedolagaBot вернул HTTP $status"
+            ;;
+    esac
+    return 1
+}
+
 validate_telegram_token() {
     local token="$1"
     local response
@@ -1572,17 +1607,59 @@ fi
 echo ""
 print_header "Интеграция с BedolagaBot (опционально)"
 echo ""
-print_info "Для отправки уведомлений пользователям через BedolagaBot"
+print_info "Эта интеграция отправляет пользователям сообщения через твой основной VPN-бот BedolagaBot"
+print_info "Например: бан, разблокировка, предупреждение о Wi-Fi или мобильной сети"
+print_info "Уведомления администраторам отправляет отдельный Telegram-бот BedolagaBan, настроенный выше"
 echo ""
 if [ "$SETUP_PROFILE" = "advanced" ] && ask_yes_no "Интегрировать с BedolagaBot?"; then
     echo ""
-    MAIN_BOT_API_URL=$(ask_question "URL API BedolagaBot:")
+    print_info "На сервере основного BedolagaBot открой его .env и укажи:"
+    ui_kv "WEB_API_ENABLED" "true"
+    ui_kv "WEB_API_HOST" "0.0.0.0"
+    ui_kv "WEB_API_PORT" "8080 (или свой свободный порт)"
+    ui_kv "WEB_API_DEFAULT_TOKEN" "случайный секрет минимум 32 байта"
     echo ""
-    MAIN_BOT_API_KEY=$(ask_secret "API ключ BedolagaBot:")
+    print_info "Секрет можно создать на сервере BedolagaBot командой: openssl rand -hex 32"
+    print_info "Сохрани результат после WEB_API_DEFAULT_TOKEN= и пересоздай контейнер основного бота"
+    print_info "Если отдельный активный токен уже создан через /tokens, можно использовать его"
+    echo ""
+    print_info "URL — адрес Web API основного бота без /tokens и /ban-notifications/send"
+    print_info "Примеры: http://10.0.0.5:8080 или https://bot-api.example.com"
+    MAIN_BOT_API_URL=$(ask_question "URL Web API основного BedolagaBot:")
+    while [[ ! "$MAIN_BOT_API_URL" =~ ^https?:// ]]; do
+        print_warning "URL должен начинаться с http:// или https://"
+        MAIN_BOT_API_URL=$(ask_question "URL Web API основного BedolagaBot:")
+    done
+    echo ""
+    MAIN_BOT_API_KEY=$(ask_secret "WEB_API_DEFAULT_TOKEN или отдельный API-ключ BedolagaBot:")
+    while [ -z "$MAIN_BOT_API_KEY" ]; do
+        print_warning "API-ключ основного BedolagaBot обязателен"
+        MAIN_BOT_API_KEY=$(ask_secret "WEB_API_DEFAULT_TOKEN или отдельный API-ключ BedolagaBot:")
+    done
+
+    print_info "Проверяю Web API основного BedolagaBot..."
+    while ! validate_main_bot_connection "$MAIN_BOT_API_URL" "$MAIN_BOT_API_KEY"; do
+        if ! ask_yes_no "Ввести URL и API-ключ BedolagaBot заново?"; then
+            MAIN_BOT_API_URL=""
+            MAIN_BOT_API_KEY=""
+            print_warning "Интеграция с BedolagaBot отключена из-за ошибки проверки"
+            break
+        fi
+        MAIN_BOT_API_URL=$(ask_question "URL Web API основного BedolagaBot:")
+        while [[ ! "$MAIN_BOT_API_URL" =~ ^https?:// ]]; do
+            print_warning "URL должен начинаться с http:// или https://"
+            MAIN_BOT_API_URL=$(ask_question "URL Web API основного BedolagaBot:")
+        done
+        MAIN_BOT_API_KEY=$(ask_secret "WEB_API_DEFAULT_TOKEN или отдельный API-ключ BedolagaBot:")
+        while [ -z "$MAIN_BOT_API_KEY" ]; do
+            print_warning "API-ключ основного BedolagaBot обязателен"
+            MAIN_BOT_API_KEY=$(ask_secret "WEB_API_DEFAULT_TOKEN или отдельный API-ключ BedolagaBot:")
+        done
+    done
 else
     MAIN_BOT_API_URL=""
     MAIN_BOT_API_KEY=""
-    print_info "Интеграция с BedolagaBot отключена"
+    print_info "Интеграция с основным BedolagaBot отключена; админские уведомления продолжат работать"
 fi
 
 # --- PostgreSQL ---
