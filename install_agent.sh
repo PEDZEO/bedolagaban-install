@@ -315,7 +315,7 @@ probe_server_transport() {
     if timeout 8 openssl s_client -connect "${host}:${port}" -servername "$host" -brief </dev/null >/dev/null 2>&1; then
         return 0
     fi
-    if timeout 5 bash -c "</dev/tcp/${host}/${port}" >/dev/null 2>&1; then
+    if timeout 5 bash -c 'exec 3<>/dev/tcp/"$1"/"$2"' _ "$host" "$port" >/dev/null 2>&1; then
         return 1
     fi
     return 2
