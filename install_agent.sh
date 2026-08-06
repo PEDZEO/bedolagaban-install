@@ -610,6 +610,11 @@ verify_agent_runtime() {
             sleep 3
             continue
         fi
+        if ! docker exec banhammer-agent sh -lc 'docker version --format "{{.Server.Version}}" >/dev/null' 2>/dev/null; then
+            last_reason="Docker Engine не отвечает внутри агента"
+            sleep 3
+            continue
+        fi
 
         if ! docker exec banhammer-agent sh -lc 'command -v ipset >/dev/null && command -v iptables >/dev/null' 2>/dev/null; then
             last_reason="в контейнере агента отсутствуют ipset/iptables"
@@ -674,6 +679,7 @@ verify_agent_runtime() {
     print_success "Контейнер banhammer-agent запущен"
     print_success "Версия агента: ${agent_version}"
     print_success "Docker socket доступен агенту"
+    print_success "Docker Engine отвечает агенту"
     print_success "Конфигурация и лицензия подтверждены"
     print_success "Агент подключился к центральному серверу"
     if [ "$xray_bridge_required" -eq 1 ]; then

@@ -349,6 +349,67 @@ get_env_value() {
     sed -n "s/^${key}=//p" "$env_file" | tail -n1
 }
 
+set_env_value() {
+    local env_file="$1"
+    local key="$2"
+    local value="$3"
+    local tmp_file="${env_file}.tmp.$$"
+    awk -v key="$key" -v value="$value" '
+        BEGIN { found = 0 }
+        index($0, key "=") == 1 {
+            if (!found) print key "=" value
+            found = 1
+            next
+        }
+        { print }
+        END { if (!found) print key "=" value }
+    ' "$env_file" > "$tmp_file"
+    mv -f "$tmp_file" "$env_file"
+}
+
+configure_manual_update_environment() {
+    local env_file="$1"
+    local install_dir="$2"
+    set_env_value "$env_file" SYSTEM_UPDATE_ENABLED true
+    set_env_value "$env_file" SYSTEM_UPDATE_MODE registry
+    set_env_value "$env_file" SYSTEM_UPDATE_DOCKER_SOCKET /var/run/docker.sock
+    set_env_value "$env_file" SYSTEM_UPDATE_HOST_BASE "$(dirname "$install_dir")"
+    set_env_value "$env_file" SYSTEM_UPDATE_COMPOSE_SUBDIR "$(basename "$install_dir")"
+    set_env_value "$env_file" SYSTEM_UPDATE_SOURCE_SUBDIR "$(basename "$install_dir")-src"
+    chmod 600 "$env_file"
+}
+
+manual_update_is_ready() {
+    local env_file="$1"
+    local port="$2"
+    local install_dir="$3"
+    local api_token
+    local response
+    api_token=$(get_env_value "$env_file" API_TOKEN)
+    [ -n "$api_token" ] || return 1
+    response=$(curl -fsS --max-time 10 \
+        -H "Authorization: Bearer $api_token" \
+        "http://127.0.0.1:${port}/api/system/update-status" 2>/dev/null || true)
+    if printf '%s' "$response" | grep -q '"ready":true'; then
+        return 0
+    fi
+    if printf '%s' "$response" | grep -q '"ready":false'; then
+        return 1
+    fi
+
+    # Compatibility with releases that predate the detailed readiness field.
+    printf '%s' "$response" | grep -q '"enabled":true' || return 1
+    [ -f "$install_dir/docker-compose.yml" ] || return 1
+    docker exec banhammer-lite sh -c '
+        test "$SYSTEM_UPDATE_ENABLED" = "true" &&
+        test "$SYSTEM_UPDATE_MODE" = "registry" &&
+        test -n "$SYSTEM_UPDATE_HOST_BASE" &&
+        test -n "$SYSTEM_UPDATE_COMPOSE_SUBDIR" &&
+        test -S /var/run/docker.sock &&
+        test "$(curl -fsS --max-time 5 --unix-socket /var/run/docker.sock http://localhost/_ping)" = "OK"
+    ' >/dev/null 2>&1
+}
+
 is_server_install_dir() {
     local candidate="$1"
     [ -f "${candidate}/.env" ] || return 1
@@ -500,6 +561,8 @@ update_existing_server() {
     old_server_image=$(docker inspect -f '{{.Image}}' banhammer-lite 2>/dev/null || true)
     old_bot_image=$(docker inspect -f '{{.Image}}' banhammer-bot 2>/dev/null || true)
 
+    configure_manual_update_environment "$env_file" "$INSTALL_DIR"
+
     print_header "$([ "$pull_images" = "true" ] && echo "Обновление сервера и бота" || echo "Восстановление контейнеров")"
     print_info "Конфигурация и PostgreSQL не изменяются"
     cd "$INSTALL_DIR"
@@ -550,6 +613,14 @@ update_existing_server() {
         if [ "$pull_images" = "true" ] && { [ -n "$old_server_image" ] || [ -n "$old_bot_image" ]; }; then
             rollback_existing_images "$old_server_image" "$old_bot_image"
         fi
+        return 1
+    fi
+
+    if manual_update_is_ready "$env_file" "$http_port" "$INSTALL_DIR"; then
+        print_success "Кнопка обновления готова: Docker и Compose проверены"
+    else
+        print_error "Кнопка обновления не готова после обновления установки"
+        print_info "Запусти полную перенастройку installer, чтобы восстановить compose-конфигурацию"
         return 1
     fi
 
@@ -2199,6 +2270,14 @@ if wait_for_container banhammer-bot 90; then
     print_success "Telegram-бот стабильно работает"
 else
     print_error "Telegram-бот не подтвердил готовность"
+    INSTALL_HEALTH_OK=false
+fi
+
+print_info "Проверяю готовность ручного обновления из Telegram-бота..."
+if manual_update_is_ready "$ENV_FILE" "$HTTP_PORT" "$INSTALL_DIR"; then
+    print_success "Кнопка обновления готова: Docker и Compose проверены"
+else
+    print_error "Ручное обновление из Telegram-бота не прошло проверку"
     INSTALL_HEALTH_OK=false
 fi
 
