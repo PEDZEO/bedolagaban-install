@@ -997,6 +997,14 @@ prepare_tls_paths_for_container() {
     print_info "Контейнер будет использовать: $TLS_CERT_PATH и $TLS_KEY_PATH"
 }
 
+prepare_caddy_tls_paths_for_container() {
+    TLS_CERT_PATH=""
+    TLS_KEY_PATH=""
+
+    print_success "Caddy data будет подключена к контейнеру напрямую"
+    print_info "Продлённые Caddy сертификаты будут подхватываться автоматически"
+}
+
 find_nginx_cert_paths() {
     local domain="$1"
     local cert_candidate=""
@@ -1498,7 +1506,7 @@ if ask_yes_no "Включить TLS шифрование?"; then
             if [ -f "$DOMAIN_CERT" ]; then
                 print_success "Сертификат для $TLS_DOMAIN найден!"
                 if [ -f "$DOMAIN_KEY" ]; then
-                    prepare_tls_paths_for_container "$DOMAIN_CERT" "$DOMAIN_KEY"
+                    prepare_caddy_tls_paths_for_container
                 else
                     print_warning "Ключ для $TLS_DOMAIN не найден рядом с сертификатом"
                 fi
