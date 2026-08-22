@@ -36,6 +36,8 @@ SETUP_PROFILE=""
 INSTALL_ACTION=""
 FORCE_REINSTALL=false
 INSTALLER_INPUT_FD=9
+LATEST_AGENT_VERSION=""
+LATEST_AGENT_VERSION_FETCHED=false
 
 # Keep interactive input attached to the terminal even when the installer is
 # started through a pipe (for example: curl ... | bash). Preserve the original
@@ -176,6 +178,42 @@ print_success() { printf '  %b[ OK ]%b %s\n' "$GREEN" "$NC" "$1"; }
 print_error() { printf '  %b[ERR ]%b %s\n' "$RED" "$NC" "$1"; }
 print_warning() { printf '  %b[WARN]%b %s\n' "$YELLOW" "$NC" "$1"; }
 print_info() { printf '  %b[INFO]%b %s\n' "$BLUE" "$NC" "$1"; }
+
+get_installed_agent_version() {
+    local version
+    version=$(docker exec banhammer-agent sh -lc 'cat /app/VERSION 2>/dev/null || true' 2>/dev/null | tr -d '\r\n' || true)
+    version=${version#v}
+    if [[ "$version" =~ ^[0-9]+([.][0-9]+){2}([._+-][0-9A-Za-z.-]+)?$ ]]; then
+        printf '%s\n' "$version"
+    fi
+    return 0
+}
+
+refresh_latest_agent_version() {
+    local version=""
+    if [ "$LATEST_AGENT_VERSION_FETCHED" != "true" ]; then
+        if command -v curl >/dev/null 2>&1; then
+            version=$(curl -fsSL --connect-timeout 2 --max-time 4 \
+                https://raw.githubusercontent.com/PEDZEO/Bedolaga-Ban/main/agent/VERSION 2>/dev/null | tr -d '\r\n' || true)
+        fi
+        version=${version#v}
+        if [[ "$version" =~ ^[0-9]+([.][0-9]+){2}([._+-][0-9A-Za-z.-]+)?$ ]]; then
+            LATEST_AGENT_VERSION="$version"
+        else
+            LATEST_AGENT_VERSION=""
+        fi
+        LATEST_AGENT_VERSION_FETCHED=true
+    fi
+    return 0
+}
+
+version_is_newer() {
+    local candidate="$1"
+    local installed="$2"
+    [ -n "$candidate" ] && [ -n "$installed" ] || return 1
+    [ "$candidate" != "$installed" ] || return 1
+    [ "$(printf '%s\n%s\n' "$installed" "$candidate" | sort -V | tail -n 1)" = "$candidate" ]
+}
 
 print_input_unavailable() {
     print_error "Интерактивный ввод недоступен: stdin закрыт и терминал не найден" >&2
@@ -568,20 +606,37 @@ COMPOSE
 }
 
 print_agent_diagnostics() {
-    echo ""
-    print_info "Диагностика агента:"
-    docker inspect -f 'status={{.State.Status}} running={{.State.Running}} exit={{.State.ExitCode}} restart={{.RestartCount}} oom={{.State.OOMKilled}}' banhammer-agent 2>/dev/null || true
-    docker compose ps || true
-    echo ""
-    print_info "Последние логи агента:"
-    docker logs --tail=120 banhammer-agent 2>&1 || docker compose logs --tail=120 || true
+    local state
+    local version
+    local logs
+    local errors
+    version=$(get_installed_agent_version)
+    state=$(docker inspect -f '{{.State.Status}}|{{.State.ExitCode}}|{{.RestartCount}}|{{.State.OOMKilled}}' banhammer-agent 2>/dev/null || true)
+    logs=$(docker logs --tail=200 banhammer-agent 2>&1 || true)
+    errors=$(printf '%s\n' "$logs" | grep -Ei 'error|critical|traceback|invalid|failed|cannot|no space left|oom' | tail -n 6 || true)
+
+    ui_section "Краткая диагностика"
+    ui_kv "Версия" "${version:+v}${version:-неизвестно}"
+    if [ -n "$state" ]; then
+        ui_kv "Контейнер" "$(cut -d'|' -f1 <<< "$state")"
+        ui_kv "Код / перезапуски" "$(cut -d'|' -f2 <<< "$state") / $(cut -d'|' -f3 <<< "$state")"
+        ui_kv "OOM" "$(cut -d'|' -f4 <<< "$state")"
+    else
+        ui_kv "Контейнер" "не найден"
+    fi
+    if [ -n "$errors" ]; then
+        print_warning "Последние ошибки (до 6 строк):"
+        printf '%s\n' "$errors" | sed 's/^/      /'
+    fi
+    print_info "Полные логи: docker logs banhammer-agent"
+    return 0
 }
 
 fail_agent_ready() {
     local reason="$1"
     print_error "$reason"
     print_agent_diagnostics
-    exit 1
+    return 1
 }
 
 verify_agent_runtime() {
@@ -621,6 +676,7 @@ verify_agent_runtime() {
         logs=$(docker logs --tail=250 banhammer-agent 2>&1 || true)
         if printf '%s\n' "$logs" | grep -Eiq 'INVALID LICENSE|LICENSE_KEY not configured|Configuration error|ConfigValidationError|Traceback|NameError|ModuleNotFoundError|No module named|Cannot connect to the Docker daemon|No space left on device|Agent cannot start|CRITICAL'; then
             fail_agent_ready "Агент запустился с критической ошибкой"
+            return 1
         fi
 
         agent_version=$(docker exec banhammer-agent sh -lc 'cat /app/VERSION 2>/dev/null || true' 2>/dev/null | tr -d '\r' | head -n 1)
@@ -699,23 +755,21 @@ verify_agent_runtime() {
 
     if [ "$ready" -ne 1 ]; then
         fail_agent_ready "Агент не подтвердил готовность за ${timeout} секунд: ${last_reason}"
+        return 1
     fi
 
-    print_success "Контейнер banhammer-agent запущен"
-    print_success "Версия агента: ${agent_version}"
-    print_success "Docker socket доступен агенту"
+    ui_section "Проверка агента"
+    ui_kv "Версия" "v${agent_version}"
+    print_success "Контейнер и сетевые права готовы"
     print_success "Docker Engine отвечает агенту"
-    print_success "Конфигурация и лицензия подтверждены"
-    print_success "Агент подключился к центральному серверу"
+    print_success "Конфигурация, лицензия и подключение подтверждены"
     if [ "$xray_bridge_required" -eq 1 ]; then
         print_success "Xray API bridge отвечает"
     fi
 
     echo ""
-    print_info "Последние логи агента:"
-    docker logs --tail=30 banhammer-agent 2>&1 || docker compose logs --tail=30 || true
-    echo ""
     print_success "$success_message"
+    return 0
 }
 
 upgrade_existing_runtime() {
@@ -727,16 +781,16 @@ upgrade_existing_runtime() {
     print_info "Обновление BedolagaBan Agent: ${INSTALL_DIR}"
     if [ ! -f "$env_file" ]; then
         print_error "Existing agent config not found: ${env_file}"
-        exit 1
+        return 1
     fi
     print_info "1/7 Проверяю Docker..."
     if ! command -v docker &> /dev/null; then
         print_error "Docker not found"
-        exit 1
+        return 1
     fi
     if ! docker compose version &> /dev/null; then
         print_error "Docker Compose v2 not found"
-        exit 1
+        return 1
     fi
     print_success "Docker и Docker Compose доступны"
 
@@ -744,7 +798,7 @@ upgrade_existing_runtime() {
     old_image_id=$(docker inspect -f '{{.Image}}' banhammer-agent 2>/dev/null || true)
     REMNAWAVE_CONTAINER_NAME=$(get_env_value "$env_file" REMNAWAVE_CONTAINER_NAME "remnanode")
     if ! docker inspect "$REMNAWAVE_CONTAINER_NAME" >/dev/null 2>&1; then
-        choose_remnawave_container || exit 1
+        choose_remnawave_container || return 1
     fi
     mkdir -p "${INSTALL_DIR}/data"
     print_info "2/7 Делаю backup текущих файлов..."
@@ -801,7 +855,7 @@ upgrade_existing_runtime() {
     print_info "4/7 Обновляю docker-compose.yml..."
     if ! write_agent_compose; then
         restore_agent_update_backup "$env_file" "$compose_file" "$backup_suffix" "$old_image_id" || true
-        exit 1
+        return 1
     fi
     print_success "docker-compose.yml обновлен"
 
@@ -814,7 +868,7 @@ upgrade_existing_runtime() {
         [ -f "${compose_file}.bak.${backup_suffix}" ] && cp "${compose_file}.bak.${backup_suffix}" "$compose_file"
         chmod 600 "$env_file" "$compose_file" 2>/dev/null || true
         print_error "Не удалось скачать образ; предыдущая конфигурация восстановлена"
-        exit 1
+        return 1
     fi
     print_success "Образ агента скачан"
 
@@ -822,7 +876,7 @@ upgrade_existing_runtime() {
     if ! docker compose up -d --force-recreate; then
         print_error "Не удалось пересоздать контейнер агента"
         restore_agent_update_backup "$env_file" "$compose_file" "$backup_suffix" "$old_image_id" || true
-        exit 1
+        return 1
     fi
     print_success "Контейнер пересоздан"
 
@@ -841,7 +895,7 @@ upgrade_existing_runtime() {
     else
         print_error "Откат выполнен, но агент не подтвердил готовность"
     fi
-    exit 1
+    return 1
 }
 
 check_node_logs() {
@@ -907,33 +961,93 @@ parse_agent_arguments() {
 
 diagnose_existing_agent() {
     local logs
+    local state
+    local version
+    local failed=0
     cd "$INSTALL_DIR"
-    print_agent_diagnostics
-    if ! docker inspect -f '{{.State.Running}}' banhammer-agent 2>/dev/null | grep -q true; then
-        print_error "Контейнер агента не запущен"
-        return 1
-    fi
+    version=$(get_installed_agent_version)
+    state=$(docker inspect -f '{{.State.Status}}|{{.RestartCount}}|{{.State.OOMKilled}}' banhammer-agent 2>/dev/null || true)
     logs=$(docker logs --tail=300 banhammer-agent 2>&1 || true)
-    if ! grep -qi 'Configuration validated' <<< "$logs"; then
+
+    ui_section "Диагностика агента"
+    ui_kv "Версия" "${version:+v}${version:-неизвестно}"
+    if [ -n "$state" ]; then
+        ui_kv "Контейнер" "$(cut -d'|' -f1 <<< "$state")"
+        ui_kv "Перезапуски / OOM" "$(cut -d'|' -f2 <<< "$state") / $(cut -d'|' -f3 <<< "$state")"
+    else
+        ui_kv "Контейнер" "не найден"
+    fi
+
+    if docker inspect -f '{{.State.Running}}' banhammer-agent 2>/dev/null | grep -q true; then
+        print_success "Контейнер запущен"
+    else
+        print_error "Контейнер агента не запущен"
+        failed=1
+    fi
+    if grep -qi 'Configuration validated' <<< "$logs"; then
+        print_success "Конфигурация подтверждена"
+    else
         print_error "Агент не подтвердил конфигурацию"
-        return 1
+        failed=1
     fi
-    if ! grep -qi 'License valid' <<< "$logs"; then
+    if grep -qi 'License valid' <<< "$logs"; then
+        print_success "Лицензия действительна"
+    else
         print_error "Агент не подтвердил лицензию"
-        return 1
+        failed=1
     fi
-    if ! grep -qi 'Connected to ' <<< "$logs"; then
+    if grep -qi 'Connected to ' <<< "$logs"; then
+        print_success "Подключение к серверу установлено"
+    else
         print_error "Агент не подключен к центральному серверу"
+        failed=1
+    fi
+    if [ "$failed" -ne 0 ]; then
+        local errors
+        errors=$(printf '%s\n' "$logs" | grep -Ei 'error|critical|traceback|invalid|failed|cannot|no space left|oom' | tail -n 6 || true)
+        if [ -n "$errors" ]; then
+            print_warning "Последние ошибки (до 6 строк):"
+            printf '%s\n' "$errors" | sed 's/^/      /'
+        fi
+        print_info "Полные логи: docker logs banhammer-agent"
         return 1
     fi
-    print_success "Агент работает, лицензия и подключение подтверждены"
+    print_success "Диагностика пройдена"
+    return 0
 }
 
 choose_existing_agent_action() {
+    local current_version
+    local latest_version
+    local version_status=""
+    local update_description="Скачать образ, проверить запуск и откатить при ошибке"
+    current_version=$(get_installed_agent_version)
+    refresh_latest_agent_version
+    latest_version="$LATEST_AGENT_VERSION"
+
+    if [ -n "$current_version" ] && [ -n "$latest_version" ]; then
+        if version_is_newer "$latest_version" "$current_version"; then
+            version_status="ДОСТУПНА v${latest_version}"
+            update_description="Обновить v${current_version} → v${latest_version}; при ошибке выполнить откат"
+        elif [ "$current_version" = "$latest_version" ]; then
+            version_status="АКТУАЛЬНО"
+            update_description="Уже установлена последняя версия; можно переустановить образ"
+        else
+            version_status="НОВЕЕ РЕЛИЗА"
+            update_description="Установленная версия новее опубликованной"
+        fi
+    elif [ -n "$latest_version" ]; then
+        version_status="ДОСТУПНА v${latest_version}"
+    else
+        version_status="ВЕРСИЮ НЕ ПРОВЕРИТЬ"
+    fi
+
     ui_section "Установленный агент"
     ui_kv "Каталог" "$INSTALL_DIR"
+    ui_kv "Текущая версия" "${current_version:+v}${current_version:-неизвестно}"
+    ui_kv "Последняя версия" "${latest_version:+v}${latest_version:-неизвестно}"
     echo ""
-    ui_menu_item "1" "Обновить агент" "Скачать образ, проверить запуск и откатить при ошибке" "РЕКОМЕНДУЕТСЯ"
+    ui_menu_item "1" "Обновить агент" "$update_description" "$version_status"
     ui_menu_item "2" "Диагностика" "Проверить конфигурацию, лицензию и подключение"
     ui_menu_item "3" "Полная перенастройка" "Текущие файлы будут сохранены в backup"
     ui_menu_item "4" "Выйти"
@@ -950,8 +1064,35 @@ choose_existing_agent_action() {
                     return
                 fi
                 ;;
-            4) exit 0 ;;
+            4) INSTALL_ACTION="exit"; return ;;
             *) print_warning "Выбери число от 1 до 4" ;;
+        esac
+    done
+}
+
+wait_for_existing_agent_menu() {
+    ask_question "Нажми Enter, чтобы вернуться в меню..." >/dev/null
+}
+
+run_existing_agent_menu() {
+    while [ "$FORCE_REINSTALL" != "true" ]; do
+        INSTALL_ACTION=""
+        ui_clear
+        ui_banner "BEDOLAGABAN" "NODE AGENT" "${IMAGE}  •  ${INSTALL_DIR}"
+        choose_existing_agent_action
+        case "$INSTALL_ACTION" in
+            update)
+                if ! upgrade_existing_runtime; then
+                    print_error "Обновление не завершено"
+                fi
+                wait_for_existing_agent_menu
+                ;;
+            diagnose)
+                diagnose_existing_agent || true
+                wait_for_existing_agent_menu
+                ;;
+            exit) return 0 ;;
+            *) [ "$FORCE_REINSTALL" = "true" ] && return 0 ;;
         esac
     done
 }
@@ -978,11 +1119,15 @@ ui_banner "BEDOLAGABAN" "NODE AGENT" "${IMAGE}  •  ${INSTALL_DIR}"
 run_agent_preflight
 
 if [ -n "$FOUND_INSTALL_DIR" ] && [ "$FORCE_REINSTALL" != "true" ]; then
-    [ -n "$INSTALL_ACTION" ] || choose_existing_agent_action
-    case "$INSTALL_ACTION" in
-        update) upgrade_existing_runtime; exit $? ;;
-        diagnose) diagnose_existing_agent; exit $? ;;
-    esac
+    if [ -n "$INSTALL_ACTION" ]; then
+        case "$INSTALL_ACTION" in
+            update) upgrade_existing_runtime; exit $? ;;
+            diagnose) diagnose_existing_agent; exit $? ;;
+        esac
+    else
+        run_existing_agent_menu
+        [ "$FORCE_REINSTALL" = "true" ] || exit 0
+    fi
 fi
 
 if [ -z "$FOUND_INSTALL_DIR" ] && [ -n "$INSTALL_ACTION" ]; then
