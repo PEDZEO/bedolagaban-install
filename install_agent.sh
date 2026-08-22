@@ -193,8 +193,8 @@ refresh_latest_agent_version() {
     local version=""
     if [ "$LATEST_AGENT_VERSION_FETCHED" != "true" ]; then
         if command -v curl >/dev/null 2>&1; then
-            version=$(curl -fsSL --connect-timeout 2 --max-time 4 \
-                https://raw.githubusercontent.com/PEDZEO/Bedolaga-Ban/main/agent/VERSION 2>/dev/null | tr -d '\r\n' || true)
+            version=$(curl -fsSL --connect-timeout 3 --max-time 8 \
+                https://raw.githubusercontent.com/PEDZEO/bedolagaban-install/main/agent-version.txt 2>/dev/null | tr -d '\r\n' || true)
         fi
         version=${version#v}
         if [[ "$version" =~ ^[0-9]+([.][0-9]+){2}([._+-][0-9A-Za-z.-]+)?$ ]]; then
