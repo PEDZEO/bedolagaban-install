@@ -137,6 +137,7 @@ ui_menu_item() {
     [ -n "$marker" ] && printf ' %b%s%b' "$GREEN" "$marker" "$NC"
     printf '\n'
     [ -n "$description" ] && printf '      %b%s%b\n' "$MUTED" "$description" "$NC"
+    return 0
 }
 
 ui_kv() {

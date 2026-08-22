@@ -35,6 +35,15 @@ INSTALL_DIR="${INSTALL_DIR:-/opt/banhammer-agent}"
 SETUP_PROFILE=""
 INSTALL_ACTION=""
 FORCE_REINSTALL=false
+INSTALLER_INPUT_FD=9
+
+# Keep interactive input attached to the terminal even when the installer is
+# started through a pipe (for example: curl ... | bash). Preserve the original
+# stdin on the same descriptor for automation where no controlling terminal
+# exists; command substitutions must not silently replace it with /dev/null.
+if ! { exec 9</dev/tty; } 2>/dev/null; then
+    exec 9<&0
+fi
 
 ui_width() {
     local width
@@ -140,6 +149,7 @@ ui_menu_item() {
     [ -n "$marker" ] && printf ' %b%s%b' "$GREEN" "$marker" "$NC"
     printf '\n'
     [ -n "$description" ] && printf '      %b%s%b\n' "$MUTED" "$description" "$NC"
+    return 0
 }
 
 ui_kv() {
@@ -167,11 +177,19 @@ print_error() { printf '  %b[ERR ]%b %s\n' "$RED" "$NC" "$1"; }
 print_warning() { printf '  %b[WARN]%b %s\n' "$YELLOW" "$NC" "$1"; }
 print_info() { printf '  %b[INFO]%b %s\n' "$BLUE" "$NC" "$1"; }
 
+print_input_unavailable() {
+    print_error "Интерактивный ввод недоступен: stdin закрыт и терминал не найден" >&2
+    print_info "Запусти: bash <(curl -fsSL https://raw.githubusercontent.com/PEDZEO/bedolagaban-install/main/install_agent.sh)" >&2
+}
+
 ask_question() {
     local question="$1"
     local answer
     printf '\n  %b?%b %s\n  %b>%b ' "$YELLOW" "$NC" "$question" "$BLUE" "$NC" >&2
-    read -r answer
+    if ! IFS= read -r -u "$INSTALLER_INPUT_FD" answer; then
+        print_input_unavailable
+        return 1
+    fi
     answer=$(sanitize_terminal_input "$answer")
     echo "$answer"
 }
@@ -180,7 +198,11 @@ ask_secret() {
     local question="$1"
     local answer
     printf '\n  %b?%b %s\n  %b>%b ' "$YELLOW" "$NC" "$question" "$BLUE" "$NC" >&2
-    read -r -s answer
+    if ! IFS= read -r -s -u "$INSTALLER_INPUT_FD" answer; then
+        printf '\n' >&2
+        print_input_unavailable
+        return 1
+    fi
     printf '\n' >&2
     answer=$(sanitize_terminal_input "$answer")
     echo "$answer"
@@ -205,7 +227,10 @@ ask_yes_no() {
     local yn
     while true; do
         printf '\n  %b?%b %s %b[y/n]%b\n  %b>%b ' "$YELLOW" "$NC" "$1" "$MUTED" "$NC" "$BLUE" "$NC" >&2
-        read -r yn
+        if ! IFS= read -r -u "$INSTALLER_INPUT_FD" yn; then
+            print_input_unavailable
+            return 1
+        fi
         yn=$(normalize_yes_no_input "$yn")
         case $yn in
             y|yes|да ) return 0;;
@@ -1254,7 +1279,11 @@ if ! docker pull "$IMAGE" --quiet 2>/dev/null; then
     print_info "Нужные права: read:packages"
     echo ""
     printf '%bGitHub Personal Access Token: %b' "$YELLOW" "$NC"
-    read -r -s GHCR_TOKEN
+    if ! IFS= read -r -s -u "$INSTALLER_INPUT_FD" GHCR_TOKEN; then
+        echo ""
+        print_input_unavailable
+        exit 1
+    fi
     echo ""
     if echo "$GHCR_TOKEN" | docker login ghcr.io -u pedzeo --password-stdin 2>/dev/null; then
         print_success "Авторизация успешна"
