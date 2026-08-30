@@ -817,7 +817,7 @@ upgrade_existing_runtime() {
     set_env_value "$env_file" SUSPICIOUS_DESTINATION_AGENT_BLOCK_ENABLED false
     ensure_env_value "$env_file" SUSPICIOUS_DESTINATION_BLOCK_COMMAND ""
     set_env_value "$env_file" SUSPICIOUS_DESTINATION_BLOCK_TIMEOUT 2
-    set_env_value "$env_file" XRAY_ROUTING_BLOCK_ENABLED true
+    ensure_env_value "$env_file" XRAY_ROUTING_BLOCK_ENABLED false
     current_xray_command=$(get_env_value "$env_file" XRAY_API_COMMAND "")
     if [ -z "$current_xray_command" ] || [[ "$current_xray_command" == docker\ exec*rw-core* ]]; then
         set_env_value "$env_file" XRAY_API_COMMAND "docker exec ${REMNAWAVE_CONTAINER_NAME} rw-core"
@@ -827,15 +827,19 @@ upgrade_existing_runtime() {
     set_env_value "$env_file" XRAY_API_RETRY_INTERVAL 300
     set_env_value "$env_file" XRAY_ROUTING_RECONCILE_INTERVAL 60
     ensure_env_value "$env_file" XRAY_RULE_DATA_DIR "/var/log/remnanode"
-    set_env_value "$env_file" XRAY_ROUTING_AUTO_SETUP_ENABLED true
-    set_env_value "$env_file" XRAY_ROUTING_RULES_ENABLED true
+    ensure_env_value "$env_file" XRAY_ROUTING_AUTO_SETUP_ENABLED false
+    ensure_env_value "$env_file" XRAY_ROUTING_RULES_ENABLED false
     ensure_env_value "$env_file" XRAY_BLOCK_RULE_TAG BANHAMMER_SUSPICIOUS_DESTINATIONS
     ensure_env_value "$env_file" XRAY_BLOCK_OUTBOUND_TAG BLOCK
     ensure_env_value "$env_file" XRAY_DIRECT_RULE_TAG BANHAMMER_DIRECT_DESTINATIONS
     ensure_env_value "$env_file" XRAY_DIRECT_OUTBOUND_TAG DIRECT
     ensure_env_value "$env_file" XRAY_WARP_RULE_TAG BANHAMMER_WARP_DESTINATIONS
     ensure_env_value "$env_file" XRAY_WARP_OUTBOUND_TAG WARP
-    set_env_value "$env_file" XRAY_WARP_AUTO_SETUP_ENABLED true
+    ensure_env_value "$env_file" XRAY_TORRENT_RESOLVE_IPS_ENABLED false
+    ensure_env_value "$env_file" XRAY_TORRENT_RESOLVE_CACHE_TTL 900
+    ensure_env_value "$env_file" XRAY_TORRENT_RESOLVE_BACKOFF 60
+    ensure_env_value "$env_file" TORRENT_KERNEL_BLOCK_ENABLED false
+    ensure_env_value "$env_file" XRAY_WARP_AUTO_SETUP_ENABLED false
     ensure_env_value "$env_file" XRAY_WARP_WORK_DIR /app/data/warp
     ensure_env_value "$env_file" XRAY_WARP_PROFILE_PATH ""
     ensure_env_value "$env_file" XRAY_WARP_OUTBOUND_CONFIG_PATH ""
@@ -1368,22 +1372,26 @@ SUSPICIOUS_DESTINATION_AGENT_GUARD_ENABLED=true
 SUSPICIOUS_DESTINATION_AGENT_BLOCK_ENABLED=false
 SUSPICIOUS_DESTINATION_BLOCK_COMMAND=
 SUSPICIOUS_DESTINATION_BLOCK_TIMEOUT=2
-XRAY_ROUTING_BLOCK_ENABLED=true
+XRAY_ROUTING_BLOCK_ENABLED=false
 XRAY_API_COMMAND=docker exec ${REMNAWAVE_CONTAINER_NAME} rw-core
 XRAY_API_SERVER=127.0.0.1:61001
 XRAY_API_TIMEOUT=15
 XRAY_API_RETRY_INTERVAL=300
 XRAY_ROUTING_RECONCILE_INTERVAL=60
 XRAY_RULE_DATA_DIR=/var/log/remnanode
-XRAY_ROUTING_AUTO_SETUP_ENABLED=true
-XRAY_ROUTING_RULES_ENABLED=true
+XRAY_ROUTING_AUTO_SETUP_ENABLED=false
+XRAY_ROUTING_RULES_ENABLED=false
 XRAY_BLOCK_RULE_TAG=BANHAMMER_SUSPICIOUS_DESTINATIONS
 XRAY_BLOCK_OUTBOUND_TAG=BLOCK
 XRAY_DIRECT_RULE_TAG=BANHAMMER_DIRECT_DESTINATIONS
 XRAY_DIRECT_OUTBOUND_TAG=DIRECT
 XRAY_WARP_RULE_TAG=BANHAMMER_WARP_DESTINATIONS
 XRAY_WARP_OUTBOUND_TAG=WARP
-XRAY_WARP_AUTO_SETUP_ENABLED=true
+XRAY_TORRENT_RESOLVE_IPS_ENABLED=false
+XRAY_TORRENT_RESOLVE_CACHE_TTL=900
+XRAY_TORRENT_RESOLVE_BACKOFF=60
+TORRENT_KERNEL_BLOCK_ENABLED=false
+XRAY_WARP_AUTO_SETUP_ENABLED=false
 XRAY_WARP_WORK_DIR=/app/data/warp
 XRAY_WARP_PROFILE_PATH=
 XRAY_WARP_OUTBOUND_CONFIG_PATH=
