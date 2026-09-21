@@ -599,8 +599,6 @@ update_existing_server() {
             print_error "Обновлённая Compose-конфигурация невалидна; контейнеры не изменены"
             return 1
         fi
-        print_info "Удаляю неиспользуемые Docker-образы старше 7 дней..."
-        docker image prune -a -f --filter "until=168h" >/dev/null 2>&1 || true
         print_info "Скачиваю новые образы..."
         if ! docker compose pull banhammer telegram-bot; then
             restore_last_configuration || true
@@ -718,7 +716,7 @@ run_system_preflight() {
     fi
     if [ "${available_kb:-0}" -lt 2097152 ]; then
         if [ -n "${EXISTING_INSTALL_DIR:-}" ]; then
-            print_warning "Свободного места меньше 2 ГБ; диагностика доступна, перед обновлением будет выполнена очистка"
+            print_warning "Свободного места меньше 2 ГБ; перед обновлением освободи место вручную"
         else
             print_error "Недостаточно свободного места: для новой установки требуется минимум 2 ГБ"
             exit 1
@@ -2276,7 +2274,6 @@ if ! docker pull "${REGISTRY}/bedolagaban-server:${TAG}" --quiet 2>/dev/null; th
 fi
 
 print_info "Скачиваю образы..."
-docker image prune -a -f --filter "until=168h" >/dev/null 2>&1 || true
 if ! docker compose pull; then
     print_error "Не удалось скачать Docker-образы"
     if ! rollback_reconfigured_install; then

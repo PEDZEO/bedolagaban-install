@@ -355,7 +355,7 @@ run_agent_preflight() {
     available_kb=$(df -Pk / 2>/dev/null | awk 'NR==2 {print $4}')
     if [ "${available_kb:-0}" -lt 1048576 ]; then
         if [ -n "${FOUND_INSTALL_DIR:-}" ]; then
-            print_warning "Свободного места меньше 1 ГБ; диагностика доступна, перед обновлением будет выполнена очистка"
+            print_warning "Свободного места меньше 1 ГБ; перед обновлением освободи место вручную"
         else
             print_error "Для новой установки агента требуется минимум 1 ГБ свободного места"
             exit 1
@@ -964,19 +964,19 @@ upgrade_existing_runtime() {
     ensure_env_value "$env_file" LOG_ROTATE_ENABLED true
     ensure_env_value "$env_file" LOG_ROTATE_MAX_MB 50
     ensure_env_value "$env_file" LOG_ROTATE_KEEP 3
-    set_env_value "$env_file" SUSPICIOUS_DESTINATION_AGENT_GUARD_ENABLED true
-    set_env_value "$env_file" SUSPICIOUS_DESTINATION_AGENT_BLOCK_ENABLED false
+    ensure_env_value "$env_file" SUSPICIOUS_DESTINATION_AGENT_GUARD_ENABLED true
+    ensure_env_value "$env_file" SUSPICIOUS_DESTINATION_AGENT_BLOCK_ENABLED false
     ensure_env_value "$env_file" SUSPICIOUS_DESTINATION_BLOCK_COMMAND ""
-    set_env_value "$env_file" SUSPICIOUS_DESTINATION_BLOCK_TIMEOUT 2
+    ensure_env_value "$env_file" SUSPICIOUS_DESTINATION_BLOCK_TIMEOUT 2
     ensure_env_value "$env_file" XRAY_ROUTING_BLOCK_ENABLED false
     current_xray_command=$(get_env_value "$env_file" XRAY_API_COMMAND "")
     if [ -z "$current_xray_command" ] || [[ "$current_xray_command" == docker\ exec*rw-core* ]]; then
         set_env_value "$env_file" XRAY_API_COMMAND "docker exec ${REMNAWAVE_CONTAINER_NAME} rw-core"
     fi
     ensure_env_value "$env_file" XRAY_API_SERVER "127.0.0.1:61001"
-    set_env_value "$env_file" XRAY_API_TIMEOUT 15
-    set_env_value "$env_file" XRAY_API_RETRY_INTERVAL 300
-    set_env_value "$env_file" XRAY_ROUTING_RECONCILE_INTERVAL 60
+    ensure_env_value "$env_file" XRAY_API_TIMEOUT 15
+    ensure_env_value "$env_file" XRAY_API_RETRY_INTERVAL 300
+    ensure_env_value "$env_file" XRAY_ROUTING_RECONCILE_INTERVAL 60
     ensure_env_value "$env_file" XRAY_RULE_DATA_DIR "/var/log/remnanode"
     ensure_env_value "$env_file" XRAY_ROUTING_AUTO_SETUP_ENABLED false
     ensure_env_value "$env_file" XRAY_ROUTING_RULES_ENABLED false
@@ -995,13 +995,13 @@ upgrade_existing_runtime() {
     ensure_env_value "$env_file" XRAY_WARP_PROFILE_PATH ""
     ensure_env_value "$env_file" XRAY_WARP_OUTBOUND_CONFIG_PATH ""
     ensure_env_value "$env_file" XRAY_WARP_ENDPOINT ""
-    set_env_value "$env_file" XRAY_WARP_MTU 1280
+    ensure_env_value "$env_file" XRAY_WARP_MTU 1280
     ensure_env_value "$env_file" REMNAWAVE_DOCKER_COMMAND docker
     set_env_value "$env_file" REMNAWAVE_CONTAINER_NAME "$REMNAWAVE_CONTAINER_NAME"
     ensure_env_value "$env_file" REMNAWAVE_API_BRIDGE_PORT 61001
-    set_env_value "$env_file" REMNAWAVE_AUTO_RESTART_ENABLED true
-    set_env_value "$env_file" REMNAWAVE_AUTO_LOG_MOUNT_ENABLED true
-    set_env_value "$env_file" REMNAWAVE_AUTO_SETUP_TIMEOUT 20
+    ensure_env_value "$env_file" REMNAWAVE_AUTO_RESTART_ENABLED true
+    ensure_env_value "$env_file" REMNAWAVE_AUTO_LOG_MOUNT_ENABLED true
+    ensure_env_value "$env_file" REMNAWAVE_AUTO_SETUP_TIMEOUT 20
     ensure_env_value "$env_file" REMNAWAVE_WARP_OUTBOUND_CONFIG_PATH /tmp/banhammer-warp-outbound.json
     set_env_value "$env_file" DOCKER_BIN "$DOCKER_BIN"
     chmod 600 "$env_file"
@@ -1015,8 +1015,6 @@ upgrade_existing_runtime() {
     print_success "docker-compose.yml обновлен"
 
     cd "$INSTALL_DIR"
-    print_info "Освобождаю место от старых неиспользуемых образов..."
-    docker image prune -a -f --filter "until=168h" >/dev/null 2>&1 || true
     print_info "5/7 Скачиваю свежий образ агента: ${IMAGE}"
     if ! docker compose pull; then
         cp "${env_file}.bak.${backup_suffix}" "$env_file"
@@ -1607,7 +1605,6 @@ if ! docker pull "$IMAGE" --quiet 2>/dev/null; then
 fi
 
 print_info "Скачивание образа..."
-docker image prune -a -f --filter "until=168h" >/dev/null 2>&1 || true
 if ! docker compose pull; then
     print_error "Не удалось скачать образ агента; контейнер не изменен"
     restore_reinstall_backup || true
