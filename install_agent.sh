@@ -38,6 +38,8 @@ FORCE_REINSTALL=false
 INSTALLER_INPUT_FD=9
 LATEST_AGENT_VERSION=""
 LATEST_AGENT_VERSION_FETCHED=false
+LATEST_AGENT_VERSION_CHECKED_AT=-60
+LATEST_AGENT_VERSION_ERROR=""
 
 # Keep interactive input attached to the terminal even when the installer is
 # started through a pipe (for example: curl ... | bash). Preserve the original
@@ -191,19 +193,35 @@ get_installed_agent_version() {
 
 refresh_latest_agent_version() {
     local version=""
-    if [ "$LATEST_AGENT_VERSION_FETCHED" != "true" ]; then
-        if command -v curl >/dev/null 2>&1; then
-            version=$(curl -fsSL --connect-timeout 3 --max-time 8 \
-                https://raw.githubusercontent.com/PEDZEO/bedolagaban-install/main/agent-version.txt 2>/dev/null | tr -d '\r\n' || true)
+    local url response status
+    if [ "$LATEST_AGENT_VERSION_FETCHED" = "true" ] && [ $((SECONDS - LATEST_AGENT_VERSION_CHECKED_AT)) -lt 60 ]; then
+        return 0
+    fi
+    LATEST_AGENT_VERSION_FETCHED=false
+    LATEST_AGENT_VERSION=""
+    LATEST_AGENT_VERSION_ERROR="нет curl"
+    if ! command -v curl >/dev/null 2>&1; then return 0; fi
+    for url in \
+        https://raw.githubusercontent.com/PEDZEO/bedolagaban-install/main/agent-version.txt \
+        https://api.github.com/repos/PEDZEO/bedolagaban-install/contents/agent-version.txt?ref=main; do
+        if response=$(curl -fsSL --connect-timeout 3 --max-time 5 \
+            -H 'Accept: application/vnd.github.raw+json' "$url" 2>/dev/null); then
+            version=$(printf '%s' "$response" | tr -d '\r\n')
+        else
+            status=$?
+            LATEST_AGENT_VERSION_ERROR="GitHub недоступен (curl: $status)"
+            continue
         fi
         version=${version#v}
         if [[ "$version" =~ ^[0-9]+([.][0-9]+){2}([._+-][0-9A-Za-z.-]+)?$ ]]; then
             LATEST_AGENT_VERSION="$version"
-        else
-            LATEST_AGENT_VERSION=""
+            LATEST_AGENT_VERSION_FETCHED=true
+            LATEST_AGENT_VERSION_CHECKED_AT=$SECONDS
+            LATEST_AGENT_VERSION_ERROR=""
+            return 0
         fi
-        LATEST_AGENT_VERSION_FETCHED=true
-    fi
+        LATEST_AGENT_VERSION_ERROR="GitHub вернул некорректную версию"
+    done
     return 0
 }
 
@@ -1043,13 +1061,16 @@ choose_existing_agent_action() {
     elif [ -n "$latest_version" ]; then
         version_status="ДОСТУПНА v${latest_version}"
     else
-        version_status="ВЕРСИЮ НЕ ПРОВЕРИТЬ"
+        version_status="ПРОВЕРКА НЕ УДАЛАСЬ"
     fi
 
     ui_section "Установленный агент"
     ui_kv "Каталог" "$INSTALL_DIR"
     ui_kv "Текущая версия" "${current_version:+v}${current_version:-неизвестно}"
     ui_kv "Последняя версия" "${latest_version:+v}${latest_version:-неизвестно}"
+    if [ -z "$latest_version" ] && [ -n "${LATEST_AGENT_VERSION_ERROR:-}" ]; then
+        print_warning "$LATEST_AGENT_VERSION_ERROR; проверка повторится при возврате в меню"
+    fi
     echo ""
     ui_menu_item "1" "Обновить агент" "$update_description" "$version_status"
     ui_menu_item "2" "Диагностика" "Проверить конфигурацию, лицензию и подключение"
