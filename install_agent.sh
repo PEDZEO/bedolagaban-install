@@ -694,10 +694,13 @@ restore_agent_update_backup() {
         cp "${compose_file}.bak.${backup_suffix}" "$compose_file"
     fi
     chmod 600 "$env_file" "$compose_file" 2>/dev/null || true
-    if [ -n "$old_image_id" ]; then
-        docker image tag "$old_image_id" "$IMAGE" >/dev/null || true
+    if [ -z "$old_image_id" ]; then
+        print_error "Нет сохранённого ID образа для безопасного отката"
+        return 1
     fi
-    if ! (cd "$INSTALL_DIR" && docker compose up -d --force-recreate); then
+    local override_file="${compose_file}.rollback-images-${backup_suffix}.yml"
+    printf 'services:\n  banhammer-agent:\n    image: "%s"\n' "$old_image_id" > "$override_file"
+    if ! (cd "$INSTALL_DIR" && docker compose -f "$compose_file" -f "$override_file" up -d --no-deps --no-build --pull never --force-recreate banhammer-agent); then
         print_error "Предыдущие файлы восстановлены, но контейнер не запустился"
         return 1
     fi
@@ -1025,7 +1028,7 @@ upgrade_existing_runtime() {
     print_success "Образ агента скачан"
 
     print_info "6/7 Пересоздаю контейнер агента..."
-    if ! docker compose up -d --force-recreate; then
+    if ! docker compose up -d --no-deps --no-build --pull never --force-recreate banhammer-agent; then
         print_error "Не удалось пересоздать контейнер агента"
         restore_agent_update_backup "$env_file" "$compose_file" "$backup_suffix" "$old_image_id" || true
         return 1

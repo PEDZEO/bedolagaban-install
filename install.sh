@@ -459,12 +459,15 @@ wait_for_container() {
     local name="$1"
     local timeout="${2:-90}"
     local deadline=$(( $(date +%s) + timeout ))
+    local restarts
     while [ "$(date +%s)" -lt "$deadline" ]; do
         if container_is_running "$name"; then
+            restarts=$(docker inspect -f '{{.RestartCount}}' "$name") || return 1
             sleep 8
-            if container_is_running "$name"; then
+            if container_is_running "$name" && [ "$restarts" = "$(docker inspect -f '{{.RestartCount}}' "$name")" ]; then
                 return 0
             fi
+            return 1
         fi
         sleep 2
     done
@@ -539,16 +542,25 @@ rollback_existing_images() {
     local server_image_id="$1"
     local bot_image_id="$2"
     print_warning "Возвращаю предыдущие образы..."
-    if [ -n "$server_image_id" ]; then
-        docker image tag "$server_image_id" "${REGISTRY}/bedolagaban-server:${TAG}" >/dev/null || true
+    if [ -n "${LAST_CONFIG_BACKUP:-}" ]; then
+        restore_last_configuration || return 1
     fi
-    if [ -n "$bot_image_id" ]; then
-        docker image tag "$bot_image_id" "${REGISTRY}/bedolagaban-bot:${TAG}" >/dev/null || true
+    if [ -z "$server_image_id" ] || [ -z "$bot_image_id" ]; then
+        print_error "Нет сохранённых ID образов для безопасного отката"
+        return 1
     fi
-    if ! (cd "$INSTALL_DIR" && docker compose up -d --no-deps --force-recreate banhammer telegram-bot); then
+    local override_file
+    override_file=$(mktemp "$INSTALL_DIR/.rollback-images.XXXXXX.yml") || return 1
+    printf 'services:\n  banhammer:\n    image: "%s"\n  telegram-bot:\n    image: "%s"\n' "$server_image_id" "$bot_image_id" > "$override_file"
+    if ! (cd "$INSTALL_DIR" && docker compose -f docker-compose.yml -f "$override_file" up -d --no-deps --no-build --pull never --force-recreate banhammer telegram-bot); then
         print_error "Не удалось запустить предыдущие образы"
         return 1
     fi
+    if ! wait_for_http_health "${http_port:-8080}" 120 || ! wait_for_container banhammer-bot 90; then
+        print_error "Откат выполнен, но готовность сервера и бота не подтверждена"
+        return 1
+    fi
+    rm -f "$override_file"
 }
 
 update_existing_server() {
@@ -561,32 +573,51 @@ update_existing_server() {
     http_port=${http_port:-8080}
     old_server_image=$(docker inspect -f '{{.Image}}' banhammer-lite 2>/dev/null || true)
     old_bot_image=$(docker inspect -f '{{.Image}}' banhammer-bot 2>/dev/null || true)
+    if [ "$pull_images" = "true" ] && { [ -z "$old_server_image" ] || [ -z "$old_bot_image" ]; }; then
+        print_error "Не удалось сохранить образы для отката. Сначала выполни восстановление контейнеров"
+        return 1
+    fi
+    local project_name
+    project_name=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' banhammer-lite 2>/dev/null || true)
+    if [ -n "$project_name" ] && [ "$project_name" != "<no value>" ]; then
+        export COMPOSE_PROJECT_NAME="$project_name"
+    fi
 
+    backup_existing_configuration
     configure_manual_update_environment "$env_file" "$INSTALL_DIR"
 
     print_header "$([ "$pull_images" = "true" ] && echo "Обновление сервера и бота" || echo "Восстановление контейнеров")"
-    print_info "Конфигурация и PostgreSQL не изменяются"
+    print_info "Данные и настройки сохраняются; сервер может выполнить миграции БД и очистку старой истории"
+    print_warning "Перед обновлением рекомендуется резервная копия PostgreSQL: откат образов не восстанавливает удалённую историю"
     cd "$INSTALL_DIR"
 
     if [ "$pull_images" = "true" ]; then
+        # Pinned old tags must not turn an update into a silent reinstall.
+        sed -i -E "s#(ghcr.io/pedzeo/bedolagaban-(server|bot)):[^[:space:]\"']+#\\1:${TAG}#g" "$INSTALL_DIR/docker-compose.yml"
+        if ! docker compose config --quiet; then
+            restore_last_configuration || true
+            print_error "Обновлённая Compose-конфигурация невалидна; контейнеры не изменены"
+            return 1
+        fi
         print_info "Удаляю неиспользуемые Docker-образы старше 7 дней..."
         docker image prune -a -f --filter "until=168h" >/dev/null 2>&1 || true
         print_info "Скачиваю новые образы..."
         if ! docker compose pull banhammer telegram-bot; then
+            restore_last_configuration || true
             print_error "Не удалось скачать новые образы; запущенная версия не изменена"
             return 1
         fi
     fi
 
     print_info "Перезапускаю сервер..."
-    if ! docker compose up -d --no-deps --force-recreate banhammer; then
+    if ! docker compose up -d --no-deps --no-build --pull never --force-recreate banhammer; then
         print_error "Не удалось пересоздать серверный контейнер"
         if [ "$pull_images" = "true" ]; then
             rollback_existing_images "$old_server_image" "$old_bot_image" || true
         fi
         return 1
     fi
-    if ! wait_for_http_health "$http_port" 120; then
+    if ! wait_for_http_health "$http_port" 900; then
         print_error "Новая версия сервера не прошла проверку готовности"
         docker compose logs --tail=60 banhammer || true
         if [ "$pull_images" = "true" ] && { [ -n "$old_server_image" ] || [ -n "$old_bot_image" ]; }; then
@@ -601,7 +632,7 @@ update_existing_server() {
     fi
 
     print_info "Перезапускаю Telegram-бот..."
-    if ! docker compose up -d --no-deps --force-recreate telegram-bot; then
+    if ! docker compose up -d --no-deps --no-build --pull never --force-recreate telegram-bot; then
         print_error "Не удалось пересоздать контейнер Telegram-бота"
         if [ "$pull_images" = "true" ]; then
             rollback_existing_images "$old_server_image" "$old_bot_image" || true
