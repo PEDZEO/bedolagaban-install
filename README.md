@@ -532,3 +532,23 @@ chmod +x install.sh
 - GitHub организация: [BEDOLAGA-DEV](https://github.com/BEDOLAGA-DEV)
 - Сайт оплаты: [shop.pedze.ru](https://shop.pedze.ru/)
 - Telegram: [@ban](https://t.me/bedolagaban)
+# Автоматическая ротация логов
+
+Установщик агента на Linux/systemd настраивает проверку `access.log` и
+`error.log` раз в минуту: порог 50 МиБ, три архива. Значения
+`LOG_ROTATE_ENABLED=true`, `LOG_ROTATE_MAX_MB=50`, `LOG_ROTATE_KEEP=3`
+в `.env` сохраняются при обновлении. После изменения `.env` можно применить
+только ротацию: `sudo bash install_agent.sh --configure-log-rotation`.
+
+Используется copytruncate без перезапуска ноды. Возможна потеря строк на границе
+ротации; непрочитанные агентом архивы автоматически не воспроизводятся.
+Порог не является жёсткой квотой. Первая ротация большого лога требует места
+для полной копии и резерва 128 МиБ; при нехватке завершается ошибкой без очистки.
+Старые архивы сверх KEEP удаляются без корзины.
+
+Проверка: `systemctl status bedolagaban-logrotate.timer` и
+`journalctl -u bedolagaban-logrotate.service -n 30 --no-pager`.
+Не дублируйте эти файлы в другой политике logrotate.
+
+Docker-логи сервера, бота и БД в создаваемом Compose ограничены 10 МиБ × 3.
+Для работающих контейнеров требуется пересоздание с обновлённым Compose.

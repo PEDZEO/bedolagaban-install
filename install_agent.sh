@@ -321,6 +321,7 @@ show_usage() {
 --advanced        Расширенная установка
 --update          Обновить существующий агент
 --diagnose        Показать состояние и последние ошибки
+--configure-log-rotation  Настроить ротацию по .env без обновления/перезапуска агента
 --reinstall       Полностью перенастроить агент
 --help            Показать эту справку
 EOF
@@ -498,6 +499,132 @@ get_env_value() {
         printf '%s\n' "$default_value"
     fi
 }
+
+render_node_log_rotation() {
+    local log_dir="$1" size_mb="$2" keep="$3"
+    # Exact filenames only. Never interpolate glob patterns or shell syntax.
+    case "$log_dir" in
+        /*) ;;
+        *) print_error "LOG_DIR должен быть абсолютным путём"; return 1 ;;
+    esac
+    case "$log_dir" in
+        *[!a-zA-Z0-9_./\ -]*|/) print_error "Небезопасный LOG_DIR для logrotate"; return 1 ;;
+    esac
+    if ! [[ "$size_mb" =~ ^[0-9]{1,4}$ && "$keep" =~ ^[0-9]{1,2}$ ]] ||
+       (( 10#$size_mb < 1 || 10#$size_mb > 1024 || 10#$keep < 1 || 10#$keep > 30 )); then
+        print_error "LOG_ROTATE_MAX_MB: 1–1024; LOG_ROTATE_KEEP: 1–30"
+        return 1
+    fi
+    cat <<EOF
+"${log_dir}/access.log" "${log_dir}/error.log" {
+    size ${size_mb}M
+    rotate ${keep}
+    missingok
+    notifempty
+    copytruncate
+    compress
+    compressoptions -1
+    delaycompress
+    su root root
+    prerotate
+        bytes=\$(stat -c %s -- "\$1") || exit 1
+        available=\$(df -Pk -- "\$1" | awk 'NR==2 {print \$4}')
+        case "\$bytes:\$available" in *[!0-9:]*|:*|*:) exit 1 ;; esac
+        if [ "\$available" -lt "\$(( (bytes + 1023) / 1024 + 131072 ))" ]; then
+            echo "BedolagaBan: not enough space to copy \$1 and keep 128 MiB free; rotation skipped" >&2
+            exit 1
+        fi
+    endscript
+}
+EOF
+}
+
+setup_node_log_rotation() (
+    # A subshell contains traps/locals. No forced rotation; the enabled timer
+    # may run immediately when OnBootSec has already elapsed.
+    set -e
+    local env_file="${INSTALL_DIR}/.env" log_dir enabled size_mb keep key staging
+    enabled=$(get_env_value "$env_file" LOG_ROTATE_ENABLED true)
+    log_dir=$(get_env_value "$env_file" LOG_DIR /var/log/remnanode)
+    size_mb=$(get_env_value "$env_file" LOG_ROTATE_MAX_MB 50)
+    keep=$(get_env_value "$env_file" LOG_ROTATE_KEEP 3)
+    # Resolve aliases, so multiple agent installs sharing logs use one policy.
+    log_dir=$(cd -- "$log_dir" && pwd -P) || return 1
+    key=$(printf '%s' "$log_dir" | sha256sum) || return 1
+    key=${key:0:20}
+    [[ "$key" =~ ^[a-f0-9]{20}$ ]] || return 1
+    local base=/etc/bedolagaban-logrotate
+    local policy="${base}/rules/node-${key}"
+    case "$enabled" in
+        false|0|no)
+            if [ -f "$policy" ]; then rm -- "$policy" || return 1; fi
+            print_warning "Ротация этих логов выключена в .env"
+            return 0 ;;
+        true|1|yes) ;;
+        *) print_error "LOG_ROTATE_ENABLED: true или false"; return 1 ;;
+    esac
+    # Validate before installing anything or altering host configuration.
+    render_node_log_rotation "$log_dir" "$size_mb" "$keep" >/dev/null || return 1
+    if ! command -v logrotate >/dev/null 2>&1; then
+        if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends logrotate || return 1
+        elif command -v dnf >/dev/null 2>&1; then
+            dnf install -y logrotate || return 1
+        elif command -v yum >/dev/null 2>&1; then
+            yum install -y logrotate || return 1
+        else
+            print_error "Установи logrotate и повтори установщик"; return 1
+        fi
+    fi
+    if ! command -v systemctl >/dev/null 2>&1 || [ ! -d /run/systemd/system ]; then
+        print_error "Для минутного таймера ротации требуется systemd; настрой logrotate вручную"
+        return 1
+    fi
+    mkdir -p "$base/rules" /var/lib/bedolagaban-logrotate || return 1
+    chmod 755 "$base" "$base/rules" || return 1
+    staging=$(mktemp "${base}/policy.XXXXXX") || return 1
+    trap 'rm -f -- "$staging"' EXIT
+    render_node_log_rotation "$log_dir" "$size_mb" "$keep" > "$staging" || return 1
+    chmod 644 "$staging" || return 1
+    if ! logrotate --debug "$staging" >/dev/null 2>&1; then
+        print_error "logrotate отклонил конфигурацию; существующая политика не изменена"
+        return 1
+    fi
+    mv -f -- "$staging" "$policy" || return 1
+    printf 'include %s/rules\n' "$base" > "$base/logrotate.conf" || return 1
+    chmod 644 "$base/logrotate.conf" || return 1
+    cat > /etc/systemd/system/bedolagaban-logrotate.service <<EOF
+[Unit]
+Description=Rotate BedolagaBan node file logs
+
+[Service]
+Type=oneshot
+ExecStart=$(command -v logrotate) --state /var/lib/bedolagaban-logrotate/status /etc/bedolagaban-logrotate/logrotate.conf
+Nice=19
+IOSchedulingClass=idle
+TimeoutStartSec=30min
+EOF
+    [ "$?" -eq 0 ] || return 1
+    cat > /etc/systemd/system/bedolagaban-logrotate.timer <<'EOF'
+[Unit]
+Description=Check BedolagaBan node log sizes every minute
+
+[Timer]
+OnBootSec=1min
+OnUnitInactiveSec=1min
+AccuracySec=1s
+Unit=bedolagaban-logrotate.service
+
+[Install]
+WantedBy=timers.target
+EOF
+    [ "$?" -eq 0 ] || return 1
+    systemctl daemon-reload || return 1
+    systemctl enable --now bedolagaban-logrotate.timer || return 1
+    systemctl is-active --quiet bedolagaban-logrotate.timer || return 1
+    print_success "Ротация access/error: от ${size_mb} МиБ, ${keep} архива, проверка каждую минуту"
+    print_warning "copytruncate: возможна потеря строк на границе ротации; первая копия большого лога требует свободного места"
+)
 
 detect_log_dir() {
     local mounted_source
@@ -831,6 +958,9 @@ upgrade_existing_runtime() {
     print_info "3/7 Обновляю .env для BLOCK/DIRECT/WARP и Remnawave auto-setup..."
     ensure_env_value "$env_file" LOG_DIR "$(detect_log_dir)"
     ensure_env_value "$env_file" LOG_PATTERN "*.log"
+    ensure_env_value "$env_file" LOG_ROTATE_ENABLED true
+    ensure_env_value "$env_file" LOG_ROTATE_MAX_MB 50
+    ensure_env_value "$env_file" LOG_ROTATE_KEEP 3
     set_env_value "$env_file" SUSPICIOUS_DESTINATION_AGENT_GUARD_ENABLED true
     set_env_value "$env_file" SUSPICIOUS_DESTINATION_AGENT_BLOCK_ENABLED false
     ensure_env_value "$env_file" SUSPICIOUS_DESTINATION_BLOCK_COMMAND ""
@@ -906,6 +1036,7 @@ upgrade_existing_runtime() {
     sleep "${AGENT_START_DELAY:-8}"
     docker compose ps
     if (verify_agent_runtime "Готово: агент обновлен и работает"); then
+        setup_node_log_rotation || { print_error "Агент работает, но ротация НЕ настроена"; return 1; }
         return 0
     fi
 
@@ -973,6 +1104,7 @@ parse_agent_arguments() {
             --advanced) SETUP_PROFILE="advanced" ;;
             --upgrade-runtime|--update|update) INSTALL_ACTION="update" ;;
             --diagnose) INSTALL_ACTION="diagnose" ;;
+            --configure-log-rotation) INSTALL_ACTION="log-rotation" ;;
             --reinstall|--install) FORCE_REINSTALL=true ;;
             --help|-h) show_usage; exit 0 ;;
             *) print_error "Неизвестный аргумент: $1"; show_usage; exit 2 ;;
@@ -1147,6 +1279,7 @@ if [ -n "$FOUND_INSTALL_DIR" ] && [ "$FORCE_REINSTALL" != "true" ]; then
     if [ -n "$INSTALL_ACTION" ]; then
         case "$INSTALL_ACTION" in
             update) upgrade_existing_runtime; exit $? ;;
+            log-rotation) setup_node_log_rotation; exit $? ;;
             diagnose) diagnose_existing_agent; exit $? ;;
         esac
     else
@@ -1371,6 +1504,9 @@ TLS_ENABLED=${TLS_ENABLED}
 
 LOG_DIR=${LOG_DIR}
 LOG_PATTERN=*.log
+LOG_ROTATE_ENABLED=true
+LOG_ROTATE_MAX_MB=50
+LOG_ROTATE_KEEP=3
 
 HEARTBEAT_INTERVAL=30
 RECONNECT_DELAY=5
@@ -1499,6 +1635,7 @@ if ! (verify_agent_runtime "Готово: агент установлен и р�
     exit 1
 fi
 
+setup_node_log_rotation || { print_error "Агент работает, но ротация НЕ настроена"; exit 1; }
 AGENT_VERSION=$(docker exec banhammer-agent sh -lc 'cat /app/VERSION 2>/dev/null || true' 2>/dev/null | tr -d '\r\n')
 ui_banner "АГЕНТ ГОТОВ" "Все обязательные проверки пройдены" "BedolagaBan Agent v${AGENT_VERSION:-неизвестно}"
 print_success "Агент подключен к центральному серверу и принимает правила"

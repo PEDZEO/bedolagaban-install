@@ -2015,6 +2015,11 @@ services:
     image: ${REGISTRY}/bedolagaban-server:${TAG}
     container_name: banhammer-lite
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     ports:
       - "\${HTTP_PORT:-8080}:\${HTTP_PORT:-8080}"
       - "\${TCP_PORT:-9999}:\${TCP_PORT:-9999}"
@@ -2048,6 +2053,11 @@ ${REMNAWAVE_NET_REF}
     image: ${REGISTRY}/bedolagaban-bot:${TAG}
     container_name: banhammer-bot
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     env_file: .env
     environment:
       - API_URL=http://banhammer:\${HTTP_PORT:-8080}
@@ -2060,6 +2070,11 @@ ${REMNAWAVE_NET_REF}
     image: postgres:16-alpine
     container_name: banhammer-postgres
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     profiles:
       - postgres
     environment:
